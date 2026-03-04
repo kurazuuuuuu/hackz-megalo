@@ -3,7 +3,7 @@
 - Topa`z: いつか貼る
 - Doorkeeper: https://hackz-community.doorkeeper.jp/events/194352
 
-> ![NOTE]
+> [!NOTE]
 > 完全に一人プレイ専用です。
 > もし複数人がプレイするならその人数分GKEが必要になるのでインフラ費用が大変なことになります。
 
@@ -15,7 +15,7 @@
 - KubernetesのPodをいじめたり観察して遊ぶやつ
 - Podが死んでも*k8sの素晴らしい力で新たな生命(Pod)が生えてくる*
 
-> ![WARNING]
+> [!WARNING]
 > Podは非常にか弱い生命です。大切にしてあげてください。
 > 手が触れたり強い風が当たると死んでしまうかもしれません。
 
