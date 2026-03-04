@@ -8,6 +8,7 @@
 > もし複数人がプレイするならその人数分GKEが必要になるのでインフラ費用が大変なことになります。
 
 ## デプロイ
+(フロントエンドはCloudflare Accessでブロックされているためアクセスできません。)
 - Frontend: https://hackz-megalo.krz-tech.net
 - Backend: https://api.hackz-megalo.krz-tech.net
 
