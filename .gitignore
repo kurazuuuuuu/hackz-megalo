@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# .env
+.env
+
 # draw.io
 *.drawio.bkp
 
