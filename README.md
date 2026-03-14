@@ -78,7 +78,15 @@
 	- Kubernetes
 #### IDE
 - Antigravity
-#### Linter
+
+#### フロントエンド開発
+- Vite+
+    - Github: https://github.com/voidzero-dev/vite-plus
+
+#### バックエンド開発
+- Air
+    - Github: https://github.com/air-verse/air
+
 - golangci-lint
 	- Github: https://github.com/golangci/golangci-lint
 
