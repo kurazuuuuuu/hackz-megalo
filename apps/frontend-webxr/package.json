@@ -9,6 +9,8 @@
     "preview": "vp preview"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
+    "@webxr-input-profiles/assets": "^1.0.20",
     "three": "^0.183.2"
   },
   "devDependencies": {

@@ -1,0 +1,13 @@
+## 1. Implementation
+- [x] 1.1 Update OpenSpec delta for WebXR hand model rendering and UI flow changes
+- [x] 1.2 Replace WebXR hand skeleton lines with standard 3D hand models in the frontend scene
+- [x] 1.3 Keep hand-tracking interaction behavior (open-palm touch and pinch disconnect) compatible with the new hand rendering
+- [x] 1.4 Change homepage session flow to start with WebSocket connection and enter WebXR from the main screen
+- [x] 1.5 Refresh desktop-mode styling to monochrome with cyan accent
+- [x] 1.6 Stabilize reconnect startup by explicitly resetting frontend runtime state and ignoring stale socket callbacks
+- [x] 1.7 Replace Pod rendering with a local simple stretched-sphere mesh and remove external Pod model downloads
+- [x] 1.8 Serve WebXR hand model assets from frontend static files so mesh hand rendering is deterministic
+- [x] 1.9 Run `vp check` in `apps/frontend-webxr` and fix any issues
+- [x] 1.10 Run `docker compose build` at repository root and confirm build success
+- [x] 1.11 Integrate Rapier for XR Pod rigid bodies and remove physics objects when Pods become gone
+- [x] 1.12 Add hand sensor colliders for open-palm touch plus pinch-candidate detection to support future grab interactions
