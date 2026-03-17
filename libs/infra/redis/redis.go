@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -216,25 +217,55 @@ func (c *Client) ListSlaveStates(ctx context.Context, sessionID string) ([]domai
 }
 
 func (c *Client) UpdateSessionMetrics(ctx context.Context, sessionID string, fn func(domain.SessionMetrics) domain.SessionMetrics) (domain.SessionMetrics, error) {
-	metrics, err := c.GetSessionMetrics(ctx, sessionID)
-	if err != nil {
+	const maxRetries = 8
+	key := sessionMetricsKey(sessionID)
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		var updated domain.SessionMetrics
+		err := c.raw.Watch(ctx, func(tx *goredis.Tx) error {
+			payload, err := tx.Get(ctx, key).Result()
+			if err != nil {
+				if err == goredis.Nil {
+					return fmt.Errorf("session metrics not found: %s", sessionID)
+				}
+				return fmt.Errorf("get session metrics: %w", err)
+			}
+
+			metrics, err := DecodeSessionMetrics(payload)
+			if err != nil {
+				return err
+			}
+			metrics = fn(metrics)
+			if metrics.SessionID == "" {
+				metrics.SessionID = sessionID
+			}
+			metrics.UpdatedAt = time.Now().UTC()
+
+			updatedPayload, err := marshal(metrics)
+			if err != nil {
+				return fmt.Errorf("marshal session metrics: %w", err)
+			}
+
+			if _, err := tx.TxPipelined(ctx, func(pipe goredis.Pipeliner) error {
+				pipe.Set(ctx, key, updatedPayload, 0)
+				return nil
+			}); err != nil {
+				return fmt.Errorf("set session metrics: %w", err)
+			}
+
+			updated = metrics
+			return nil
+		}, key)
+		if err == nil {
+			return updated, nil
+		}
+		if errors.Is(err, goredis.TxFailedErr) {
+			continue
+		}
 		return domain.SessionMetrics{}, err
 	}
 
-	metrics = fn(metrics)
-	if metrics.SessionID == "" {
-		metrics.SessionID = sessionID
-	}
-	metrics.UpdatedAt = time.Now().UTC()
-
-	payload, err := marshal(metrics)
-	if err != nil {
-		return domain.SessionMetrics{}, fmt.Errorf("marshal session metrics: %w", err)
-	}
-	if err := c.raw.Set(ctx, sessionMetricsKey(sessionID), payload, 0).Err(); err != nil {
-		return domain.SessionMetrics{}, fmt.Errorf("set session metrics: %w", err)
-	}
-	return metrics, nil
+	return domain.SessionMetrics{}, fmt.Errorf("update session metrics: retry limit exceeded for session %s", sessionID)
 }
 
 func DecodeEvent(payload string) (domain.Event, error) {

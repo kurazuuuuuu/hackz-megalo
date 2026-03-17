@@ -101,7 +101,6 @@ func TestMasterServiceTransportFlow(t *testing.T) {
 		t.Fatalf("published TargetPod = %q, want %q", publishedEvent.TargetPod, eventReq.TargetPod)
 	}
 
-	expectedStress := eventReq.EventID * 10
 	readDeadline := time.Now().Add(timeout)
 	if err := wsConn.SetReadDeadline(readDeadline); err != nil {
 		t.Fatalf("set websocket deadline: %v", err)
@@ -127,8 +126,8 @@ func TestMasterServiceTransportFlow(t *testing.T) {
 		if state.Source != "controller-service" {
 			t.Fatalf("state Source = %q, want %q", state.Source, "controller-service")
 		}
-		if state.UpdatedAt.IsZero() {
-			t.Fatalf("state UpdatedAt should not be zero")
+		if state.ObservedAt.IsZero() {
+			t.Fatalf("state ObservedAt should not be zero")
 		}
 
 		return

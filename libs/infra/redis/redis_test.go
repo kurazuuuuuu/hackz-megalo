@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,4 +235,58 @@ func TestSessionLifecycleAndCleanup(t *testing.T) {
 	if len(states) != 0 {
 		t.Fatalf("len(states) = %d, want %d", len(states), 0)
 	}
+}
+
+func TestUpdateSessionMetricsIsAtomicUnderConcurrency(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := New(mr.Addr(), "game.events", "slave.states")
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx := context.Background()
+	session := domain.SessionMeta{
+		SessionID: "session-concurrent",
+		StartedAt: time.Now().UTC(),
+	}
+	if err := client.CreateSession(ctx, session); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	const workers = 20
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.UpdateSessionMetrics(ctx, session.SessionID, func(metrics domain.SessionMetrics) domain.SessionMetrics {
+				metrics.LiveSlaves++
+				return metrics
+			})
+			if err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatalf("UpdateSessionMetrics() concurrent error = %v", err)
+	}
+
+	metrics, err := client.GetSessionMetrics(ctx, session.SessionID)
+	if err != nil {
+		t.Fatalf("GetSessionMetrics() error = %v", err)
+	}
+	if metrics.LiveSlaves != workers {
+		t.Fatalf("LiveSlaves = %d, want %d", metrics.LiveSlaves, workers)
+	}
+	if metrics.SessionID != session.SessionID {
+		t.Fatalf("SessionID = %q, want %q", metrics.SessionID, session.SessionID)
+	}
+	if metrics.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt should not be zero")
+	}
+
+	t.Logf("concurrent updates completed: %d workers", workers)
 }
