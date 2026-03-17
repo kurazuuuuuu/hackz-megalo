@@ -37,22 +37,21 @@ resource "google_clouddeploy_target" "gke_target" {
   execution_configs {
     usages = ["RENDER", "DEPLOY"]
 
-    service_account = google_service_account.cicd_build_sa.email
+    artifact_storage = "gs://${google_storage_bucket.clouddeploy_staging.name}/deploy-artifacts"
+    service_account  = google_service_account.cicd_build_sa.email
   }
 }
 
-# Cloud Deploy Pipelines for each app
+# Cloud Deploy pipeline for the production environment.
 resource "google_clouddeploy_delivery_pipeline" "delivery_pipeline" {
-  for_each = toset(local.apps)
-
   location    = var.region
-  name        = "${each.key}-pipeline"
-  description = "Delivery pipeline for ${each.key}"
+  name        = "hackz-megalo-pipeline"
+  description = "Delivery pipeline for hackz-megalo production"
 
   serial_pipeline {
     stages {
       target_id = google_clouddeploy_target.gke_target.target_id
-      profiles  = ["production-${each.key}"]
+      profiles  = ["production"]
     }
   }
 }
