@@ -1,8 +1,12 @@
-# Grant the External Secrets Operator Kubernetes service account access to Secret Manager via Workload Identity Federation.
-resource "google_project_iam_member" "external_secrets_secret_accessor" {
-  project = var.project_id
-  role    = "roles/secretmanager.secretAccessor"
-  member  = "principal://iam.googleapis.com/projects/${data.google_project.project.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/external-secrets/sa/external-secrets"
+data "google_secret_manager_secret" "cloudflared_token" {
+  secret_id = "cloudflared-token-secret"
+}
+
+# Grant the Secret Sync Kubernetes service account access only to the cloudflared token secret.
+resource "google_secret_manager_secret_iam_member" "cloudflared_secret_sync_accessor" {
+  secret_id = data.google_secret_manager_secret.cloudflared_token.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "principal://iam.googleapis.com/projects/${data.google_project.project.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/default/sa/cloudflared-secret-sync"
 }
 
 # Grant Cloud Build Service Account access to Secret Manager (for build-time secrets like Vite)
