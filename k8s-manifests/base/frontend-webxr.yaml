@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-webxr
+  labels:
+    app: frontend-webxr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend-webxr
+  template:
+    metadata:
+      labels:
+        app: frontend-webxr
+    spec:
+      containers:
+        - name: frontend-webxr
+          image: frontend-webxr
+          ports:
+            - containerPort: 80 # Adjust port if needed based on the frontend Dockerfile
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-webxr-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend-webxr
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
