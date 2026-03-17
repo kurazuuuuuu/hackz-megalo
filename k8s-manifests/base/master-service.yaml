@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: master-service
+  labels:
+    app: master-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: master-service
+  template:
+    metadata:
+      labels:
+        app: master-service
+    spec:
+      containers:
+        - name: master-service
+          image: master-service
+          command: ["sh", "-c"]
+          args: ["sleep 5 && /app/master-service"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MASTER_HTTP_ADDR
+              value: ":8080"
+            - name: MASTER_REDIS_ADDR
+              value: "redis-master:6379" # Example assuming a redis service named redis-master exists in k8s
+            - name: MASTER_REDIS_EVENTS_CHANNEL
+              value: "game.events"
+            - name: MASTER_REDIS_STATES_CHANNEL
+              value: "slave.states"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: master-service-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: master-service
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080

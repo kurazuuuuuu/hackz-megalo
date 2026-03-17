@@ -1,0 +1,6 @@
+project_id                 = "your-gcp-project-id"
+region                     = "asia-northeast1"
+github_app_installation_id = "12345678"        # Replace with your actual GitHub App Installation ID
+github_owner               = "kurazuuuuuu"     # Replace with your actual GitHub Owner
+github_repository          = "hackz-megalo"    # Replace with your actual GitHub Repository Name
+gke_cluster_name           = "hackz-megalo-cluster"

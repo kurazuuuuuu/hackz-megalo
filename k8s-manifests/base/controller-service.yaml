@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-service
+  labels:
+    app: controller-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: controller-service
+  template:
+    metadata:
+      labels:
+        app: controller-service
+    spec:
+      containers:
+        - name: controller-service
+          image: controller-service
+          command: ["sh", "-c"]
+          args: ["sleep 5 && /app/controller-service"]
+          ports:
+            - containerPort: 50052
+          env:
+            - name: CONTROLLER_GRPC_ADDR
+              value: ":50052"
+            - name: CONTROLLER_REDIS_ADDR
+              value: "redis-master:6379" # Example assuming a redis service named redis-master exists in k8s
+            - name: CONTROLLER_REDIS_EVENTS_CHANNEL
+              value: "game.events"
+            - name: CONTROLLER_REDIS_STATES_CHANNEL
+              value: "slave.states"
+            - name: CONTROLLER_SLAVE_GRPC_PORT
+              value: "50051"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller-service-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: controller-service
+  ports:
+    - protocol: TCP
+      port: 50052
+      targetPort: 50052

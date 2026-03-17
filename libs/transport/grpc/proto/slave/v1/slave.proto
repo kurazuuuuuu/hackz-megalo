@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package slave.v1;
+
+option go_package = "github.com/kurazuuuuuu/hackz-megalo/libs/transport/grpc/gen/slavev1;slavev1";
+
+service ControllerService {
+  rpc RegisterSlave(RegisterSlaveRequest) returns (RegisterSlaveResponse);
+}
+
+service SlaveService {
+  rpc ExecuteEvent(ExecuteEventRequest) returns (ExecuteEventResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+message RegisterSlaveRequest {
+  string k8s_pod_name = 1;
+  string k8s_pod_uid = 2;
+  string pod_ip = 3;
+  int32 initial_remaining_turns = 4;
+}
+
+message RegisterSlaveResponse {
+  string slave_id = 1;
+  SlaveState slave_state = 2;
+}
+
+message ExecuteEventRequest {
+  int32 event_id = 1;
+  int64 seed = 2;
+  string target_pod = 3;
+}
+
+message ExecuteEventResponse {
+  bool accepted = 1;
+  string message = 2;
+  SlaveState slave_state = 3;
+}
+
+message ShutdownRequest {
+  string reason = 1;
+}
+
+message ShutdownResponse {
+  bool accepted = 1;
+}
+
+message SlaveState {
+  string session_id = 1;
+  string slave_id = 2;
+  string k8s_pod_name = 3;
+  string k8s_pod_uid = 4;
+  string pod_ip = 5;
+  SlaveStatus status = 6;
+  DeathReason death_reason = 7;
+  int32 turns_lived = 8;
+  int32 remaining_turns = 9;
+  string observed_at = 10;
+  int32 stress = 11;
+  int32 fear = 12;
+  bool infected = 13;
+  bool firewall = 14;
+}
+
+enum SlaveStatus {
+  SLAVE_STATUS_UNSPECIFIED = 0;
+  SLAVE_STATUS_LIVE = 1;
+  SLAVE_STATUS_TERMINATING = 2;
+  SLAVE_STATUS_GONE = 3;
+}
+
+enum DeathReason {
+  DEATH_REASON_UNSPECIFIED = 0;
+  DEATH_REASON_LIFESPAN = 1;
+  DEATH_REASON_DISEASE = 2;
+  DEATH_REASON_PROCESS_DOWN = 3;
+  DEATH_REASON_POD_DOWN = 4;
+  DEATH_REASON_USER_ACTION = 5;
+}

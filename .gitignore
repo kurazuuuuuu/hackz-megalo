@@ -2,7 +2,9 @@
 .DS_Store
 
 # .env
-.env
+.env.*
+!.env.*.example
+!.env.example
 
 # draw.io
 *.drawio.bkp

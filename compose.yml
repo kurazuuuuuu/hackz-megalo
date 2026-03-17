@@ -1,6 +1,75 @@
 services:
+  frontend-webxr:
+    image: hackz-megalo/frontend-webxr:dev
+    build:
+      context: .
+      dockerfile: apps/frontend-webxr/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${FRONTEND_VITE_API_BASE_URL:-http://localhost:8080}
+        VITE_WS_URL: ${FRONTEND_VITE_WS_URL:-ws://localhost:8080/ws}
+    depends_on:
+      - master-service
+    ports:
+      - "4173:80"
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+
+  master-service:
+    image: hackz-megalo/master-service:dev
+    build:
+      context: .
+      dockerfile: apps/master-service/Dockerfile
+    depends_on:
+      - redis
+    environment:
+      MASTER_HTTP_ADDR: ":8080"
+      MASTER_REDIS_ADDR: redis:6379
+      MASTER_REDIS_EVENTS_CHANNEL: game.events
+      MASTER_REDIS_STATES_CHANNEL: slave.states
+    ports:
+      - "8080:8080"
+
+  controller-service:
+    image: hackz-megalo/controller-service:dev
+    build:
+      context: .
+      dockerfile: apps/controller-service/Dockerfile
+    depends_on:
+      - redis
+    environment:
+      CONTROLLER_GRPC_ADDR: ":50052"
+      CONTROLLER_REDIS_ADDR: redis:6379
+      CONTROLLER_REDIS_EVENTS_CHANNEL: game.events
+      CONTROLLER_REDIS_STATES_CHANNEL: slave.states
+      CONTROLLER_SLAVE_GRPC_PORT: "50051"
+    ports:
+      - "50052:50052"
+
+  slave-service:
+    image: hackz-megalo/slave-service:dev
+    build:
+      context: .
+      dockerfile: apps/slave-service/Dockerfile
+    depends_on:
+      - controller-service
+    environment:
+      SLAVE_GRPC_ADDR: ":50051"
+      SLAVE_POD_ID: slave-1
+      SLAVE_CONTROLLER_GRPC_TARGET: controller-service:50052
+      SLAVE_K8S_POD_NAME: slave-service-0
+      SLAVE_K8S_POD_UID: slave-service-0-uid
+      SLAVE_POD_IP: slave-service
+      SLAVE_INITIAL_REMAINING_TURNS: 10
+    ports:
+      - "50051:50051"
+
   cloudflared:
     image: cloudflare/cloudflared:latest
+    profiles:
+      - tunnel
     environment:
       - CLOUDFLARED_TOKEN=${CLOUDFLARED_TOKEN}
     command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}

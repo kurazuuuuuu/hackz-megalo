@@ -1,0 +1,54 @@
+apiVersion: skaffold/v4beta7
+kind: Config
+metadata:
+  name: hackz-megalo
+build:
+  artifacts:
+    - image: frontend-webxr
+      context: .
+      docker:
+        dockerfile: apps/frontend-webxr/Dockerfile
+        buildArgs:
+          VITE_API_BASE_URL: '{{ default "" .FRONTEND_VITE_API_BASE_URL }}'
+          VITE_WS_URL: '{{ default "" .FRONTEND_VITE_WS_URL }}'
+    - image: controller-service
+      context: .
+      docker:
+        dockerfile: apps/controller-service/Dockerfile
+    - image: master-service
+      context: .
+      docker:
+        dockerfile: apps/master-service/Dockerfile
+    - image: slave-service
+      context: .
+      docker:
+        dockerfile: apps/slave-service/Dockerfile
+
+# Default deployment (Used by Cloud Deploy)
+manifests:
+  kustomize:
+    paths:
+      - k8s-manifests/overlays/production
+deploy:
+  kubectl: {}
+
+# Local development profile (Activated by 'skaffold dev' or 'skaffold run')
+profiles:
+  - name: Default
+    activation:
+      - command: dev
+      - command: run
+    build:
+      local:
+        push: false
+    deploy:
+      kubeContext: orbstack
+      kubectl:
+        hooks:
+          before:
+            - host:
+                command: ["sh", "-c", "kubectl create secret generic cloudflared-secret --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -"]
+    manifests:
+      kustomize:
+        paths:
+          - k8s-manifests/overlays/local

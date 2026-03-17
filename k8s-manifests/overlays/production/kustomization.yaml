@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+resources:
+  - external-secret.yaml
+
+# Add patches to adjust production environment variables, managed Redis IP, custom domains, ingress, etc.
+# For example, to point backends to Cloud Memorystore instead of local redis:
+# patches:
+#   - target:
+#       kind: Deployment
+#       name: master-service
+#     patch: |-
+#       - op: replace
+#         path: /spec/template/spec/containers/0/env/1/value
+#         value: "memorystore-ip:6379"
