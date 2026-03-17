@@ -5,6 +5,34 @@ locals {
     "master-service",
     "slave-service"
   ]
+
+  app_included_files = {
+    "frontend-webxr" = [
+      ".dockerignore",
+      "apps/frontend-webxr/**"
+    ]
+    "controller-service" = [
+      ".dockerignore",
+      "apps/controller-service/**",
+      "go.mod",
+      "go.sum",
+      "libs/**"
+    ]
+    "master-service" = [
+      ".dockerignore",
+      "apps/master-service/**",
+      "go.mod",
+      "go.sum",
+      "libs/**"
+    ]
+    "slave-service" = [
+      ".dockerignore",
+      "apps/slave-service/**",
+      "go.mod",
+      "go.sum",
+      "libs/**"
+    ]
+  }
 }
 
 # Cloud Build v2 Connection to GitHub
@@ -55,7 +83,7 @@ resource "google_cloudbuild_trigger" "pr_trigger" {
   location        = var.region
   name            = "${each.key}-pr-trigger"
   description     = "Trigger for PRs modifying ${each.key}"
-  service_account = "projects/${var.project_id}/serviceAccounts/${local.cloudbuild_sa}"
+  service_account = "projects/${var.project_id}/serviceAccounts/${google_service_account.cicd_build_sa.email}"
 
   repository_event_config {
     repository = google_cloudbuildv2_repository.github_repo.id
@@ -64,9 +92,7 @@ resource "google_cloudbuild_trigger" "pr_trigger" {
     }
   }
 
-  # included_files = [
-  #   "apps/${each.key}/**"
-  # ]
+  included_files = local.app_included_files[each.key]
 
   build {
     step {
@@ -78,14 +104,16 @@ resource "google_cloudbuild_trigger" "pr_trigger" {
         <<-EOT
           if [ "${each.key}" = "frontend-webxr" ]; then
             docker build \
+              -f apps/${each.key}/Dockerfile \
               --build-arg VITE_API_BASE_URL="$$VITE_API_BASE_URL" \
               --build-arg VITE_WS_URL="$$VITE_WS_URL" \
               -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:pr-$SHORT_SHA \
-              apps/${each.key}
+              .
           else
             docker build \
+              -f apps/${each.key}/Dockerfile \
               -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:pr-$SHORT_SHA \
-              apps/${each.key}
+              .
           fi
         EOT
       ]
@@ -112,7 +140,7 @@ resource "google_cloudbuild_trigger" "push_trigger" {
   location        = var.region
   name            = "${each.key}-main-trigger"
   description     = "Trigger for pushes to main modifying ${each.key}"
-  service_account = "projects/${var.project_id}/serviceAccounts/${local.cloudbuild_sa}"
+  service_account = "projects/${var.project_id}/serviceAccounts/${google_service_account.cicd_build_sa.email}"
 
   repository_event_config {
     repository = google_cloudbuildv2_repository.github_repo.id
@@ -121,9 +149,7 @@ resource "google_cloudbuild_trigger" "push_trigger" {
     }
   }
 
-  # included_files = [
-  #   "apps/${each.key}/**"
-  # ]
+  included_files = local.app_included_files[each.key]
 
   build {
     step {
@@ -135,16 +161,18 @@ resource "google_cloudbuild_trigger" "push_trigger" {
         <<-EOT
           if [ "${each.key}" = "frontend-webxr" ]; then
             docker build \
+              -f apps/${each.key}/Dockerfile \
               --build-arg VITE_API_BASE_URL="$$VITE_API_BASE_URL" \
               --build-arg VITE_WS_URL="$$VITE_WS_URL" \
               -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:$COMMIT_SHA \
               -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:latest \
-              apps/${each.key}
+              .
           else
             docker build \
+              -f apps/${each.key}/Dockerfile \
               -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:$COMMIT_SHA \
               -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:latest \
-              apps/${each.key}
+              .
           fi
         EOT
       ]
@@ -171,6 +199,8 @@ resource "google_cloudbuild_trigger" "push_trigger" {
           gcloud deploy releases create release-$SHORT_SHA \
             --delivery-pipeline=${each.key}-pipeline \
             --region=${var.region} \
+            --gcs-source-staging-dir=gs://${google_storage_bucket.clouddeploy_staging.name}/source \
+            --skaffold-file=skaffold.yaml \
             --images=${each.key}=${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:$COMMIT_SHA
         EOT
       ]

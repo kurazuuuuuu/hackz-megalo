@@ -1,7 +1,4 @@
-# Grant GKE Compute Service Account access to Secret Manager
-# Assuming the GKE cluster uses the default Compute Engine SA.
-# If a custom SA is used for the node pool, update this accordingly.
-
+# Grant the Autopilot node service account access to Secret Manager for ESO.
 resource "google_project_iam_member" "gke_secret_accessor" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
@@ -12,5 +9,5 @@ resource "google_project_iam_member" "gke_secret_accessor" {
 resource "google_project_iam_member" "cloudbuild_secret_accessor" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+  member  = "serviceAccount:${google_service_account.cicd_build_sa.email}"
 }
