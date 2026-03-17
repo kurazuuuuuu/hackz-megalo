@@ -16,3 +16,11 @@ Use `@/openspec/AGENTS.md` to learn:
 Keep this managed block so 'openspec update' can refresh the instructions.
 
 <!-- OPENSPEC:END -->
+
+# フロントエンド開発 (apps/frontend-webxr)
+1. OpenSpecでプラン作成
+2. 実装
+    2.1 `vp check`で構文エラーがないことを確認
+    2.2 エラーがある場合修正
+3. ルートディレクトリで`docker compose build`を行い、ビルドエラーがないことを確認
+4. 実装を完了と判断しユーザーに報告
