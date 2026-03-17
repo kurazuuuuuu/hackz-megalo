@@ -33,6 +33,38 @@ profiles:
     deploy:
       kubectl: {}
 
+  - name: production-frontend-webxr
+    manifests:
+      kustomize:
+        paths:
+          - k8s-manifests/overlays/production-frontend-webxr
+    deploy:
+      kubectl: {}
+
+  - name: production-controller-service
+    manifests:
+      kustomize:
+        paths:
+          - k8s-manifests/overlays/production-controller-service
+    deploy:
+      kubectl: {}
+
+  - name: production-master-service
+    manifests:
+      kustomize:
+        paths:
+          - k8s-manifests/overlays/production-master-service
+    deploy:
+      kubectl: {}
+
+  - name: production-slave-service
+    manifests:
+      kustomize:
+        paths:
+          - k8s-manifests/overlays/production-slave-service
+    deploy:
+      kubectl: {}
+
   - name: development
     activation:
       - command: dev

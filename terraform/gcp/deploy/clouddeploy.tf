@@ -52,7 +52,7 @@ resource "google_clouddeploy_delivery_pipeline" "delivery_pipeline" {
   serial_pipeline {
     stages {
       target_id = google_clouddeploy_target.gke_target.target_id
-      profiles  = ["production"]
+      profiles  = ["production-${each.key}"]
     }
   }
 }
