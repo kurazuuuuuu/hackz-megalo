@@ -1,0 +1,9 @@
+root = "."
+tmp_dir = "tmp/master-service"
+
+[build]
+cmd = "go build -o ./tmp/master-service/server ./apps/master-service/cmd/server"
+bin = "./tmp/master-service/server"
+include_dir = ["apps", "libs"]
+exclude_dir = ["tmp", ".git", "node_modules", "terraform"]
+delay = 1000

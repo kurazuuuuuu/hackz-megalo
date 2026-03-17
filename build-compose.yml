@@ -1,0 +1,18 @@
+services:
+  master-service:
+    image: hackz-megalo/master-service:dev
+    build:
+      context: .
+      dockerfile: apps/master-service/Dockerfile
+
+  controller-service:
+    image: hackz-megalo/controller-service:dev
+    build:
+      context: .
+      dockerfile: apps/controller-service/Dockerfile
+
+  slave-service:
+    image: hackz-megalo/slave-service:dev
+    build:
+      context: .
+      dockerfile: apps/slave-service/Dockerfile

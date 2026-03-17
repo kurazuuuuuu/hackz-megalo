@@ -1,4 +1,49 @@
 services:
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+
+  master-service:
+    image: hackz-megalo/master-service:dev
+    build:
+      context: .
+      dockerfile: apps/master-service/Dockerfile
+    depends_on:
+      - redis
+    environment:
+      MASTER_HTTP_ADDR: ":8080"
+      MASTER_REDIS_ADDR: redis:6379
+      MASTER_REDIS_EVENTS_CHANNEL: game.events
+      MASTER_REDIS_STATES_CHANNEL: slave.states
+    ports:
+      - "8080:8080"
+
+  controller-service:
+    image: hackz-megalo/controller-service:dev
+    build:
+      context: .
+      dockerfile: apps/controller-service/Dockerfile
+    depends_on:
+      - redis
+      - slave-service
+    environment:
+      CONTROLLER_REDIS_ADDR: redis:6379
+      CONTROLLER_REDIS_EVENTS_CHANNEL: game.events
+      CONTROLLER_REDIS_STATES_CHANNEL: slave.states
+      CONTROLLER_SLAVE_GRPC_TARGET: slave-service:50051
+
+  slave-service:
+    image: hackz-megalo/slave-service:dev
+    build:
+      context: .
+      dockerfile: apps/slave-service/Dockerfile
+    environment:
+      SLAVE_GRPC_ADDR: ":50051"
+      SLAVE_POD_ID: slave-1
+    ports:
+      - "50051:50051"
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     environment:

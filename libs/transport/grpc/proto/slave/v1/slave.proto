@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package slave.v1;
+
+option go_package = "github.com/kurazuuuuuu/hackz-megalo/libs/transport/grpc/gen/slavev1;slavev1";
+
+service SlaveService {
+  rpc ExecuteEvent(ExecuteEventRequest) returns (ExecuteEventResponse);
+}
+
+message ExecuteEventRequest {
+  int32 event_id = 1;
+  int64 seed = 2;
+  string target_pod = 3;
+}
+
+message ExecuteEventResponse {
+  bool accepted = 1;
+  string message = 2;
+  SlaveState slave_state = 3;
+}
+
+message SlaveState {
+  string pod_id = 1;
+  string status = 2;
+  int32 stress = 3;
+  string updated_at = 4;
+}
