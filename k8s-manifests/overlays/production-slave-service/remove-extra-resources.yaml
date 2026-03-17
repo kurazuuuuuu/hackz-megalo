@@ -1,0 +1,59 @@
+$patch: delete
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-webxr
+---
+$patch: delete
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-webxr-svc
+---
+$patch: delete
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-service
+---
+$patch: delete
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller-service-svc
+---
+$patch: delete
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: master-service
+---
+$patch: delete
+apiVersion: v1
+kind: Service
+metadata:
+  name: master-service-svc
+---
+$patch: delete
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+---
+$patch: delete
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-proxy-config
+---
+$patch: delete
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-proxy
+---
+$patch: delete
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-proxy-svc
