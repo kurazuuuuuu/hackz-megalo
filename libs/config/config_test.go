@@ -22,6 +22,7 @@ func TestLoadMasterDefaults(t *testing.T) {
 }
 
 func TestLoadControllerRequiresTarget(t *testing.T) {
+	t.Setenv("CONTROLLER_GRPC_ADDR", "")
 	t.Setenv("CONTROLLER_SLAVE_GRPC_TARGET", "")
 
 	cfg, err := LoadController()
@@ -30,5 +31,22 @@ func TestLoadControllerRequiresTarget(t *testing.T) {
 	}
 	if cfg.SlaveGRPCTarget != "localhost:50051" {
 		t.Fatalf("SlaveGRPCTarget = %q, want %q", cfg.SlaveGRPCTarget, "localhost:50051")
+	}
+	if cfg.GRPCAddr != ":50052" {
+		t.Fatalf("GRPCAddr = %q, want %q", cfg.GRPCAddr, ":50052")
+	}
+}
+
+func TestLoadSlaveDefaults(t *testing.T) {
+	cfg, err := LoadSlave()
+	if err != nil {
+		t.Fatalf("LoadSlave() error = %v", err)
+	}
+
+	if cfg.ControllerGRPCTarget != "localhost:50052" {
+		t.Fatalf("ControllerGRPCTarget = %q, want %q", cfg.ControllerGRPCTarget, "localhost:50052")
+	}
+	if cfg.InitialRemainingTurns != 10 {
+		t.Fatalf("InitialRemainingTurns = %d, want %d", cfg.InitialRemainingTurns, 10)
 	}
 }

@@ -26,21 +26,30 @@ services:
       dockerfile: apps/controller-service/Dockerfile
     depends_on:
       - redis
-      - slave-service
     environment:
+      CONTROLLER_GRPC_ADDR: ":50052"
       CONTROLLER_REDIS_ADDR: redis:6379
       CONTROLLER_REDIS_EVENTS_CHANNEL: game.events
       CONTROLLER_REDIS_STATES_CHANNEL: slave.states
       CONTROLLER_SLAVE_GRPC_TARGET: slave-service:50051
+    ports:
+      - "50052:50052"
 
   slave-service:
     image: hackz-megalo/slave-service:dev
     build:
       context: .
       dockerfile: apps/slave-service/Dockerfile
+    depends_on:
+      - controller-service
     environment:
       SLAVE_GRPC_ADDR: ":50051"
       SLAVE_POD_ID: slave-1
+      SLAVE_CONTROLLER_GRPC_TARGET: controller-service:50052
+      SLAVE_K8S_POD_NAME: slave-service-0
+      SLAVE_K8S_POD_UID: slave-service-0-uid
+      SLAVE_POD_IP: 10.0.0.10
+      SLAVE_INITIAL_REMAINING_TURNS: 10
     ports:
       - "50051:50051"
 

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -60,6 +62,11 @@ type publishEventRequest struct {
 	TargetPod string `json:"target_pod"`
 }
 
+type masterServer struct {
+	redisClient *redislayer.Client
+	hub         *websocketHub
+}
+
 func main() {
 	cfg, err := config.LoadMaster()
 	if err != nil {
@@ -80,8 +87,11 @@ func main() {
 		log.Fatalf("ping redis: %v", err)
 	}
 
-	hub := newWebsocketHub()
-	go subscribeStateUpdates(ctx, redisClient, hub)
+	serverState := &masterServer{
+		redisClient: redisClient,
+		hub:         newWebsocketHub(),
+	}
+	go subscribeStateUpdates(ctx, redisClient, serverState.hub)
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
@@ -92,34 +102,10 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req publishEventRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		event := domain.Event{
-			EventID:   req.EventID,
-			Seed:      req.Seed,
-			TargetPod: req.TargetPod,
-			Source:    "master-service",
-			CreatedAt: time.Now().UTC(),
-		}
-
-		if err := redisClient.PublishEvent(r.Context(), event); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(event)
-	})
+	mux.HandleFunc("/events", serverState.handlePublishEvent)
+	mux.HandleFunc("/internal/events", serverState.handlePublishEvent)
+	mux.HandleFunc("/internal/slaves", serverState.handleListSlaveStates)
+	mux.HandleFunc("/internal/slaves/", serverState.handleGetSlaveState)
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -127,8 +113,8 @@ func main() {
 			return
 		}
 
-		hub.add(conn)
-		defer hub.remove(conn)
+		serverState.hub.add(conn)
+		defer serverState.hub.remove(conn)
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -158,6 +144,75 @@ func main() {
 	}
 }
 
+func (s *masterServer) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req publishEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	event := domain.Event{
+		EventID:   req.EventID,
+		Seed:      req.Seed,
+		TargetPod: req.TargetPod,
+		Source:    "master-service",
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := s.redisClient.PublishEvent(r.Context(), event); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(event)
+}
+
+func (s *masterServer) handleListSlaveStates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	states, err := s.redisClient.ListSlaveStates(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(states)
+}
+
+func (s *masterServer) handleGetSlaveState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	slaveID := strings.TrimPrefix(r.URL.Path, "/internal/slaves/")
+	if slaveID == "" || slaveID == r.URL.Path {
+		http.Error(w, "slave_id is required", http.StatusBadRequest)
+		return
+	}
+
+	state, err := s.redisClient.GetSlaveState(r.Context(), slaveID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, fmt.Sprintf("slave state not found: %s", slaveID), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(state)
+}
+
 func subscribeStateUpdates(ctx context.Context, redisClient *redislayer.Client, hub *websocketHub) {
 	pubsub := redisClient.SubscribeStates(ctx)
 	defer func() {
@@ -182,7 +237,7 @@ func subscribeStateUpdates(ctx context.Context, redisClient *redislayer.Client, 
 				continue
 			}
 
-			log.Printf("received slave state update: pod=%s status=%s stress=%d", state.PodID, state.Status, state.Stress)
+			log.Printf("received slave state update: slave_id=%s pod=%s status=%s remaining_turns=%d", state.SlaveID, state.K8sPodName, state.Status, state.RemainingTurns)
 			hub.broadcast(state)
 		}
 	}

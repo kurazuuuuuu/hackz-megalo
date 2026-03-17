@@ -17,13 +17,19 @@ type MasterConfig struct {
 }
 
 type ControllerConfig struct {
+	GRPCAddr        string
 	Redis           RedisConfig
 	SlaveGRPCTarget string
 }
 
 type SlaveConfig struct {
-	GRPCAddr string
-	PodID    string
+	GRPCAddr              string
+	ControllerGRPCTarget  string
+	PodID                 string
+	K8sPodName            string
+	K8sPodUID             string
+	PodIP                 string
+	InitialRemainingTurns int32
 }
 
 func LoadMaster() (MasterConfig, error) {
@@ -40,12 +46,16 @@ func LoadMaster() (MasterConfig, error) {
 
 func LoadController() (ControllerConfig, error) {
 	cfg := ControllerConfig{
+		GRPCAddr: envOrDefault("CONTROLLER_GRPC_ADDR", ":50052"),
 		Redis: RedisConfig{
 			Addr:          envOrDefault("CONTROLLER_REDIS_ADDR", "localhost:6379"),
 			EventsChannel: envOrDefault("CONTROLLER_REDIS_EVENTS_CHANNEL", "game.events"),
 			StatesChannel: envOrDefault("CONTROLLER_REDIS_STATES_CHANNEL", "slave.states"),
 		},
 		SlaveGRPCTarget: envOrDefault("CONTROLLER_SLAVE_GRPC_TARGET", "localhost:50051"),
+	}
+	if cfg.GRPCAddr == "" {
+		return ControllerConfig{}, fmt.Errorf("CONTROLLER_GRPC_ADDR is required")
 	}
 	if cfg.SlaveGRPCTarget == "" {
 		return ControllerConfig{}, fmt.Errorf("CONTROLLER_SLAVE_GRPC_TARGET is required")
@@ -55,14 +65,31 @@ func LoadController() (ControllerConfig, error) {
 
 func LoadSlave() (SlaveConfig, error) {
 	cfg := SlaveConfig{
-		GRPCAddr: envOrDefault("SLAVE_GRPC_ADDR", ":50051"),
-		PodID:    envOrDefault("SLAVE_POD_ID", "slave-1"),
+		GRPCAddr:              envOrDefault("SLAVE_GRPC_ADDR", ":50051"),
+		ControllerGRPCTarget:  envOrDefault("SLAVE_CONTROLLER_GRPC_TARGET", "localhost:50052"),
+		PodID:                 envOrDefault("SLAVE_POD_ID", "slave-1"),
+		K8sPodName:            envOrDefault("SLAVE_K8S_POD_NAME", "slave-service-0"),
+		K8sPodUID:             envOrDefault("SLAVE_K8S_POD_UID", "slave-service-0-uid"),
+		PodIP:                 envOrDefault("SLAVE_POD_IP", "127.0.0.1"),
+		InitialRemainingTurns: envOrDefaultInt32("SLAVE_INITIAL_REMAINING_TURNS", 10),
 	}
 	if cfg.GRPCAddr == "" {
 		return SlaveConfig{}, fmt.Errorf("SLAVE_GRPC_ADDR is required")
 	}
+	if cfg.ControllerGRPCTarget == "" {
+		return SlaveConfig{}, fmt.Errorf("SLAVE_CONTROLLER_GRPC_TARGET is required")
+	}
 	if cfg.PodID == "" {
 		return SlaveConfig{}, fmt.Errorf("SLAVE_POD_ID is required")
+	}
+	if cfg.K8sPodName == "" {
+		return SlaveConfig{}, fmt.Errorf("SLAVE_K8S_POD_NAME is required")
+	}
+	if cfg.K8sPodUID == "" {
+		return SlaveConfig{}, fmt.Errorf("SLAVE_K8S_POD_UID is required")
+	}
+	if cfg.PodIP == "" {
+		return SlaveConfig{}, fmt.Errorf("SLAVE_POD_IP is required")
 	}
 	return cfg, nil
 }
@@ -83,6 +110,17 @@ func validateRedis(cfg RedisConfig) error {
 func envOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+func envOrDefaultInt32(key string, defaultValue int32) int32 {
+	if value := os.Getenv(key); value != "" {
+		var parsed int64
+		_, err := fmt.Sscan(value, &parsed)
+		if err == nil {
+			return int32(parsed)
+		}
 	}
 	return defaultValue
 }

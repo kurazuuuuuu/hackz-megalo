@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/kurazuuuuuu/hackz-megalo/libs/domain"
+	slavev1 "github.com/kurazuuuuuu/hackz-megalo/libs/transport/grpc/gen/slavev1"
 )
 
 type Client struct {
@@ -57,7 +59,7 @@ func (c *Client) PublishSlaveState(ctx context.Context, state domain.SlaveState)
 		return fmt.Errorf("marshal slave state: %w", err)
 	}
 
-	key := fmt.Sprintf("slave:state:%s", state.PodID)
+	key := fmt.Sprintf("slave:state:%s", state.SlaveID)
 	if err := c.raw.Set(ctx, key, payload, 0).Err(); err != nil {
 		return fmt.Errorf("set slave state: %w", err)
 	}
@@ -73,6 +75,40 @@ func (c *Client) SubscribeEvents(ctx context.Context) *goredis.PubSub {
 
 func (c *Client) SubscribeStates(ctx context.Context) *goredis.PubSub {
 	return c.raw.Subscribe(ctx, c.statesChannel)
+}
+
+func (c *Client) GetSlaveState(ctx context.Context, slaveID string) (domain.SlaveState, error) {
+	key := fmt.Sprintf("slave:state:%s", slaveID)
+	payload, err := c.raw.Get(ctx, key).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			return domain.SlaveState{}, fmt.Errorf("slave state not found: %s", slaveID)
+		}
+		return domain.SlaveState{}, fmt.Errorf("get slave state: %w", err)
+	}
+	return DecodeSlaveState(payload)
+}
+
+func (c *Client) ListSlaveStates(ctx context.Context) ([]domain.SlaveState, error) {
+	keys, err := c.raw.Keys(ctx, "slave:state:*").Result()
+	if err != nil {
+		return nil, fmt.Errorf("list slave state keys: %w", err)
+	}
+	sort.Strings(keys)
+
+	states := make([]domain.SlaveState, 0, len(keys))
+	for _, key := range keys {
+		payload, err := c.raw.Get(ctx, key).Result()
+		if err != nil {
+			return nil, fmt.Errorf("get slave state from %s: %w", key, err)
+		}
+		state, err := DecodeSlaveState(payload)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, nil
 }
 
 func DecodeEvent(payload string) (domain.Event, error) {
@@ -97,4 +133,104 @@ func marshal(v any) (string, error) {
 		return "", err
 	}
 	return string(payload), nil
+}
+
+func ToProtoSlaveState(state domain.SlaveState) *slavev1.SlaveState {
+	return &slavev1.SlaveState{
+		SlaveId:        state.SlaveID,
+		K8SPodName:     state.K8sPodName,
+		K8SPodUid:      state.K8sPodUID,
+		PodIp:          state.PodIP,
+		Status:         toProtoStatus(state.Status),
+		DeathReason:    toProtoDeathReason(state.DeathReason),
+		TurnsLived:     state.TurnsLived,
+		RemainingTurns: state.RemainingTurns,
+		ObservedAt:     state.ObservedAt.Format(time.RFC3339),
+	}
+}
+
+func FromProtoSlaveState(state *slavev1.SlaveState, source string) domain.SlaveState {
+	if state == nil {
+		return domain.SlaveState{Source: source}
+	}
+
+	observedAt := time.Now().UTC()
+	if raw := state.GetObservedAt(); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			observedAt = parsed
+		}
+	}
+
+	return domain.SlaveState{
+		SlaveID:        state.GetSlaveId(),
+		K8sPodName:     state.GetK8SPodName(),
+		K8sPodUID:      state.GetK8SPodUid(),
+		PodIP:          state.GetPodIp(),
+		Status:         fromProtoStatus(state.GetStatus()),
+		DeathReason:    fromProtoDeathReason(state.GetDeathReason()),
+		TurnsLived:     state.GetTurnsLived(),
+		RemainingTurns: state.GetRemainingTurns(),
+		ObservedAt:     observedAt,
+		Source:         source,
+	}
+}
+
+func toProtoStatus(status domain.SlaveStatus) slavev1.SlaveStatus {
+	switch status {
+	case domain.SlaveStatusLive:
+		return slavev1.SlaveStatus_SLAVE_STATUS_LIVE
+	case domain.SlaveStatusTerminating:
+		return slavev1.SlaveStatus_SLAVE_STATUS_TERMINATING
+	case domain.SlaveStatusGone:
+		return slavev1.SlaveStatus_SLAVE_STATUS_GONE
+	default:
+		return slavev1.SlaveStatus_SLAVE_STATUS_UNSPECIFIED
+	}
+}
+
+func toProtoDeathReason(reason domain.DeathReason) slavev1.DeathReason {
+	switch reason {
+	case domain.DeathReasonLifespan:
+		return slavev1.DeathReason_DEATH_REASON_LIFESPAN
+	case domain.DeathReasonDisease:
+		return slavev1.DeathReason_DEATH_REASON_DISEASE
+	case domain.DeathReasonProcessDown:
+		return slavev1.DeathReason_DEATH_REASON_PROCESS_DOWN
+	case domain.DeathReasonPodDown:
+		return slavev1.DeathReason_DEATH_REASON_POD_DOWN
+	case domain.DeathReasonUserAction:
+		return slavev1.DeathReason_DEATH_REASON_USER_ACTION
+	default:
+		return slavev1.DeathReason_DEATH_REASON_UNSPECIFIED
+	}
+}
+
+func fromProtoStatus(status slavev1.SlaveStatus) domain.SlaveStatus {
+	switch status {
+	case slavev1.SlaveStatus_SLAVE_STATUS_LIVE:
+		return domain.SlaveStatusLive
+	case slavev1.SlaveStatus_SLAVE_STATUS_TERMINATING:
+		return domain.SlaveStatusTerminating
+	case slavev1.SlaveStatus_SLAVE_STATUS_GONE:
+		return domain.SlaveStatusGone
+	default:
+		return domain.SlaveStatusUnspecified
+	}
+}
+
+func fromProtoDeathReason(reason slavev1.DeathReason) domain.DeathReason {
+	switch reason {
+	case slavev1.DeathReason_DEATH_REASON_LIFESPAN:
+		return domain.DeathReasonLifespan
+	case slavev1.DeathReason_DEATH_REASON_DISEASE:
+		return domain.DeathReasonDisease
+	case slavev1.DeathReason_DEATH_REASON_PROCESS_DOWN:
+		return domain.DeathReasonProcessDown
+	case slavev1.DeathReason_DEATH_REASON_POD_DOWN:
+		return domain.DeathReasonPodDown
+	case slavev1.DeathReason_DEATH_REASON_USER_ACTION:
+		return domain.DeathReasonUserAction
+	default:
+		return domain.DeathReasonUnspecified
+	}
 }
