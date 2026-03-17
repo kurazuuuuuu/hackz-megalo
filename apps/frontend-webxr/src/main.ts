@@ -22,17 +22,16 @@ app.innerHTML = `
       <p class="eyebrow">Hackz Megalo</p>
       <h1>Pod たちの箱庭</h1>
       <p class="lead">
-        先生は観察者です。セッションを開始すると Pod の群れが現れ、フロントエンドは
-        「押しつぶす」「落下する」の 2 種だけを絶対状態として backend に通知します。
+        先生は観察者です。まず新しいセッションを開始して WebSocket 接続を確立し、
+        接続完了後のメイン画面から WebXR モードを開始できます。
       </p>
       <div class="start-meta">
-        <span>ダブルクリックで押しつぶす</span>
-        <span>机から落下すると Gone を通知</span>
+        <span>Start で WebSocket 接続開始</span>
+        <span>接続完了後にメイン画面へ移動</span>
         <span data-xr-badge>WebXR: checking</span>
       </div>
       <div class="start-actions">
-        <button class="start-button" type="button" data-start-session>Start Session</button>
-        <button class="xr-button" type="button" data-start-xr disabled>Enter WebXR</button>
+        <button class="start-button" type="button" data-start-session>新しいセッションを開始</button>
       </div>
       <p class="status-line" data-start-status>待機中です。</p>
     </section>
@@ -60,11 +59,11 @@ app.innerHTML = `
           <div class="field-header">
             <div>
               <p class="eyebrow">Pod Field</p>
-              <h3>群れを観察して、必要なら押しつぶしてください</h3>
+              <h3>デスクトップは監視専用です。3D空間は WebXR で表示されます</h3>
             </div>
-            <div class="field-help">Single click: select / Double click: crush / WebXR: hand tracking only</div>
+            <div class="field-help">Desktop: monitor only / WebXR: hand tracking + Rapier collider</div>
           </div>
-          <div class="scene-root" data-scene-root></div>
+          <div class="scene-runtime-root" data-scene-root aria-hidden="true"></div>
           <div class="pod-strip" data-pod-strip></div>
         </section>
 
@@ -90,7 +89,6 @@ const store = new GameStore();
 const startScreen = requiredElement<HTMLElement>("[data-screen='start']");
 const gameScreen = requiredElement<HTMLElement>("[data-screen='game']");
 const startButton = requiredElement<HTMLButtonElement>("[data-start-session]");
-const startXRButton = requiredElement<HTMLButtonElement>("[data-start-xr]");
 const startStatus = requiredElement<HTMLElement>("[data-start-status]");
 const xrBadge = requiredElement<HTMLElement>("[data-xr-badge]");
 const sessionId = requiredElement<HTMLElement>("[data-session-id]");
@@ -128,13 +126,10 @@ const scene = new PodScene(sceneRoot, {
 
 let socket: WebSocket | null = null;
 let metricsRefreshTimer = 0;
+let connectionAttemptId = 0;
 
 startButton.addEventListener("click", () => {
-  void startSession("desktop");
-});
-
-startXRButton.addEventListener("click", () => {
-  void startSession("webxr");
+  void startSession();
 });
 
 enterXRButton.addEventListener("click", () => {
@@ -170,16 +165,16 @@ store.subscribe((state) => {
   connectionPill.textContent = state.connectionMessage;
   livePill.textContent = `Live ${counts.live}`;
   gonePill.textContent = `Gone ${counts.gone}`;
-  modePill.textContent = state.xrActive ? "WebXR" : "Desktop";
+  modePill.textContent = state.xrActive ? "WebXR" : "Monitor";
 
-  startXRButton.disabled = !state.xrSupported || state.phase === "connecting";
+  startButton.disabled = state.phase === "connecting";
   enterXRButton.hidden = !state.xrSupported || state.xrActive || state.phase !== "playing";
   disconnectButton.textContent = state.xrActive ? "Disconnect + Exit XR" : "Disconnect";
 
   renderSelectedPanel(selected);
   renderPodStrip(pods, state.selectedPodId, state.hoveredPodId);
   renderActivity(state.activity);
-  scene.update(pods, state.selectedPodId, state.hoveredPodId, new Set());
+  scene.update(pods, state.selectedPodId, state.hoveredPodId, new Set(state.xrEliminatedPodIds));
   scene.setHudData({
     sessionId: state.session?.session_id ?? "not connected",
     live: counts.live,
@@ -191,7 +186,7 @@ store.subscribe((state) => {
 
 store.log({
   kind: "system",
-  message: "先生、Start Session か Enter WebXR で Pod たちの観察を始められます。",
+  message: "先生、新しいセッションを開始すると監視画面から WebXR に入れます。",
 });
 
 async function probeXRSupport(): Promise<void> {
@@ -212,38 +207,51 @@ async function probeXRSupport(): Promise<void> {
   }
 }
 
-async function startSession(mode: "desktop" | "webxr"): Promise<void> {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    if (mode === "webxr") {
-      await enterXRMode();
-    }
+async function startSession(): Promise<void> {
+  if (store.getState().phase === "connecting") {
     return;
   }
 
-  store.patch({
-    phase: "connecting",
-    errorMessage: null,
-    connectionMessage: mode === "webxr" ? "WebXR セッションへ接続中..." : "セッションへ接続中...",
-  });
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    return;
+  }
+
+  const attemptId = ++connectionAttemptId;
+  prepareSessionInitialization();
 
   startButton.disabled = true;
-  startXRButton.disabled = true;
 
   try {
-    socket = await openSocket();
+    const connectedSocket = await openSocket(attemptId);
+    if (attemptId !== connectionAttemptId) {
+      connectedSocket.close();
+      return;
+    }
+
+    store.patch({
+      connectionMessage: "初期スナップショット同期中...",
+    });
     const snapshot = await waitForSessionSnapshot();
+    if (attemptId !== connectionAttemptId) {
+      return;
+    }
+
     store.hydrateSnapshot(snapshot.session, snapshot.metrics, snapshot.states);
     store.log({
       kind: "system",
       message: `セッション ${snapshot.session.session_id.slice(0, 8)} を開始しました。`,
     });
-
-    if (mode === "webxr") {
-      await enterXRMode();
-    }
   } catch (error) {
-    socket?.close();
-    socket = null;
+    if (attemptId !== connectionAttemptId) {
+      return;
+    }
+
+    if (socket) {
+      const closingSocket = socket;
+      socket = null;
+      closingSocket.close();
+    }
+
     const message = error instanceof Error ? error.message : "セッションを開始できませんでした。";
     store.patch({
       phase: "error",
@@ -252,8 +260,9 @@ async function startSession(mode: "desktop" | "webxr"): Promise<void> {
       connectionMessage: message,
     });
   } finally {
-    startButton.disabled = false;
-    startXRButton.disabled = !store.getState().xrSupported;
+    if (attemptId === connectionAttemptId) {
+      startButton.disabled = false;
+    }
   }
 }
 
@@ -279,6 +288,7 @@ async function enterXRMode(): Promise<void> {
 }
 
 async function disconnectSession(message: string): Promise<void> {
+  connectionAttemptId += 1;
   window.clearTimeout(metricsRefreshTimer);
   metricsRefreshTimer = 0;
 
@@ -289,8 +299,9 @@ async function disconnectSession(message: string): Promise<void> {
   scene.reset();
 
   if (socket) {
-    socket.close();
+    const closingSocket = socket;
     socket = null;
+    closingSocket.close();
   }
 
   store.log({
@@ -298,41 +309,67 @@ async function disconnectSession(message: string): Promise<void> {
     message,
   });
   store.resetToDisconnected("待機中");
+  startButton.disabled = false;
 }
 
-function openSocket(): Promise<WebSocket> {
+function openSocket(attemptId: number): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     let opened = false;
 
     const nextSocket = connectSessionSocket({
       onOpen: () => {
+        if (attemptId !== connectionAttemptId) {
+          nextSocket.close();
+          reject(new Error("stale socket attempt"));
+          return;
+        }
+
         opened = true;
+        socket = nextSocket;
         store.patch({ connectionMessage: "WebSocket 接続済み" });
         resolve(nextSocket);
       },
       onMessage: (pod) => {
+        if (attemptId !== connectionAttemptId || socket !== nextSocket) {
+          return;
+        }
         handlePodUpdate(pod);
       },
       onClose: () => {
+        if (attemptId !== connectionAttemptId) {
+          return;
+        }
+
         if (!opened) {
           reject(new Error("socket closed before session start"));
           return;
         }
 
+        if (socket !== nextSocket) {
+          return;
+        }
+
         store.log({
           kind: "system",
-          message: "セッションが終了しました。もう一度 Start Session で入り直せます。",
+          message: "セッションが終了しました。もう一度「新しいセッションを開始」で入り直せます。",
         });
         store.resetToDisconnected("セッション終了");
         socket = null;
         startButton.disabled = false;
-        startXRButton.disabled = !store.getState().xrSupported;
         scene.reset();
         void scene.exitXR();
       },
       onError: () => {
+        if (attemptId !== connectionAttemptId) {
+          return;
+        }
+
         if (!opened) {
           reject(new Error("socket error"));
+          return;
+        }
+
+        if (socket !== nextSocket) {
           return;
         }
 
@@ -341,6 +378,25 @@ function openSocket(): Promise<WebSocket> {
         });
       },
     });
+  });
+}
+
+function prepareSessionInitialization(): void {
+  window.clearTimeout(metricsRefreshTimer);
+  metricsRefreshTimer = 0;
+  scene.reset();
+  store.patch({
+    phase: "connecting",
+    session: null,
+    metrics: null,
+    podsById: {},
+    selectedPodId: null,
+    hoveredPodId: null,
+    errorMessage: null,
+    actionInFlight: false,
+    xrActive: false,
+    xrEliminatedPodIds: [],
+    connectionMessage: "セッション初期化中...",
   });
 }
 
@@ -391,6 +447,7 @@ async function reportPodGone(
 
   const observedAt = new Date().toISOString();
   store.setActionInFlight(true);
+  store.markXrPodEliminated(targetId);
   store.upsertPod({
     ...pod,
     status: "SLAVE_STATUS_GONE",

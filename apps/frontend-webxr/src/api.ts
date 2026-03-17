@@ -91,7 +91,7 @@ export async function waitForSessionSnapshot(): Promise<{
 }> {
   let lastError: unknown;
 
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
       const [session, metrics, states] = await Promise.all([
         fetchSessionMeta(),
@@ -102,7 +102,7 @@ export async function waitForSessionSnapshot(): Promise<{
       return { session, metrics, states };
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => window.setTimeout(resolve, 150));
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
     }
   }
 
