@@ -24,17 +24,16 @@ build:
       docker:
         dockerfile: apps/slave-service/Dockerfile
 
-# Default deployment (Used by Cloud Deploy)
-manifests:
-  kustomize:
-    paths:
-      - k8s-manifests/overlays/production
-deploy:
-  kubectl: {}
-
-# Local development profile (Activated by 'skaffold dev' or 'skaffold run')
 profiles:
-  - name: Default
+  - name: production
+    manifests:
+      kustomize:
+        paths:
+          - k8s-manifests/overlays/production
+    deploy:
+      kubectl: {}
+
+  - name: development
     activation:
       - command: dev
       - command: run
