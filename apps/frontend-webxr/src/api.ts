@@ -12,11 +12,10 @@ function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
-export const apiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? "",
-);
+export const apiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? "");
 
-export const wsUrl = import.meta.env.VITE_WS_URL || 
+export const wsUrl =
+  import.meta.env.VITE_WS_URL ||
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {

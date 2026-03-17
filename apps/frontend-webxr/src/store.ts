@@ -14,11 +14,13 @@ export interface GameState {
   actionInFlight: boolean;
   activity: ActivityEntry[];
   xrSupported: boolean;
+  xrActive: boolean;
+  xrEliminatedPodIds: string[];
 }
 
 type Listener = (state: GameState) => void;
 
-function initialState(): GameState {
+function initialState(xrSupported = false): GameState {
   return {
     phase: "idle",
     session: null,
@@ -30,12 +32,14 @@ function initialState(): GameState {
     errorMessage: null,
     actionInFlight: false,
     activity: [],
-    xrSupported: "xr" in navigator,
+    xrSupported,
+    xrActive: false,
+    xrEliminatedPodIds: [],
   };
 }
 
 export class GameStore {
-  private state: GameState = initialState();
+  private state: GameState = initialState(typeof navigator !== "undefined" && "xr" in navigator);
 
   private readonly listeners = new Set<Listener>();
 
@@ -61,7 +65,7 @@ export class GameStore {
 
   resetToDisconnected(message: string): void {
     this.state = {
-      ...initialState(),
+      ...initialState(this.state.xrSupported),
       connectionMessage: message,
     };
     this.emit();
@@ -83,6 +87,7 @@ export class GameStore {
       selectedPodId,
       errorMessage: null,
       connectionMessage: "接続中",
+      xrEliminatedPodIds: [],
     };
     this.emit();
   }
@@ -134,6 +139,34 @@ export class GameStore {
     this.emit();
   }
 
+  setXRSupport(xrSupported: boolean): void {
+    this.state = {
+      ...this.state,
+      xrSupported,
+    };
+    this.emit();
+  }
+
+  setXRActive(xrActive: boolean): void {
+    this.state = {
+      ...this.state,
+      xrActive,
+    };
+    this.emit();
+  }
+
+  markXrPodEliminated(slaveId: string): void {
+    if (this.state.xrEliminatedPodIds.includes(slaveId)) {
+      return;
+    }
+
+    this.state = {
+      ...this.state,
+      xrEliminatedPodIds: [...this.state.xrEliminatedPodIds, slaveId],
+    };
+    this.emit();
+  }
+
   log(entry: Omit<ActivityEntry, "id" | "createdAt">): void {
     const activity: ActivityEntry[] = [
       {
@@ -162,4 +195,22 @@ export function getPods(state: GameState): SlaveState[] {
   return Object.values(state.podsById).toSorted((left, right) =>
     left.k8s_pod_name.localeCompare(right.k8s_pod_name),
   );
+}
+
+export function getEffectiveCounts(state: GameState): { live: number; gone: number } {
+  const pods = getPods(state);
+  const baseLive =
+    state.metrics?.live_slaves ?? pods.filter((pod) => pod.status !== "SLAVE_STATUS_GONE").length;
+  const baseGone =
+    state.metrics?.gone_slaves ?? pods.filter((pod) => pod.status === "SLAVE_STATUS_GONE").length;
+
+  const locallyFallenLivePods = state.xrEliminatedPodIds.filter((slaveId) => {
+    const pod = state.podsById[slaveId];
+    return pod && pod.status !== "SLAVE_STATUS_GONE";
+  }).length;
+
+  return {
+    live: Math.max(0, baseLive - locallyFallenLivePods),
+    gone: baseGone + locallyFallenLivePods,
+  };
 }

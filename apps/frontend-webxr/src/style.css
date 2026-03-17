@@ -118,6 +118,13 @@ h1 {
   gap: 12px;
 }
 
+.start-actions,
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .start-meta span,
 .pill,
 .field-help {
@@ -129,6 +136,8 @@ h1 {
 }
 
 .start-button,
+.xr-button,
+.session-button,
 .action-grid button,
 .pod-chip {
   border: 1px solid transparent;
@@ -139,16 +148,36 @@ h1 {
     opacity 180ms ease;
 }
 
-.start-button {
+.start-button,
+.xr-button,
+.session-button {
   width: fit-content;
   padding: 14px 24px;
   border-radius: 999px;
   color: #fff6ed;
+}
+
+.start-button,
+.xr-button {
+  box-shadow: 0 16px 40px rgba(249, 115, 22, 0.16);
+}
+
+.start-button {
   background: linear-gradient(135deg, #f97316, #ea580c);
-  box-shadow: 0 16px 40px rgba(249, 115, 22, 0.25);
+}
+
+.xr-button,
+.session-button {
+  background: linear-gradient(135deg, #0f766e, #155e75);
+}
+
+.session-button.danger {
+  background: linear-gradient(135deg, #b91c1c, #7f1d1d);
 }
 
 .start-button:hover,
+.xr-button:hover,
+.session-button:hover,
 .action-grid button:hover,
 .pod-chip:hover {
   transform: translateY(-1px);
@@ -173,9 +202,9 @@ h1 {
 }
 
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   padding: 20px 24px;
 }
@@ -220,8 +249,8 @@ h1 {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.05);
   background:
-    radial-gradient(circle at top, rgba(249, 115, 22, 0.1), transparent 40%),
-    linear-gradient(180deg, #221713 0%, #110f0e 100%);
+    radial-gradient(circle at top, rgba(125, 211, 252, 0.1), transparent 42%),
+    linear-gradient(180deg, #201511 0%, #0d1215 100%);
 }
 
 .pod-scene-canvas {
@@ -259,6 +288,11 @@ h1 {
 
 .pod-chip.is-hovered {
   border-color: rgba(125, 211, 252, 0.4);
+}
+
+.pod-chip.is-fallen {
+  border-color: rgba(244, 114, 182, 0.35);
+  background: rgba(109, 40, 64, 0.28);
 }
 
 .side-panel {
@@ -331,7 +365,9 @@ h1 {
 }
 
 .action-grid button:disabled,
-.start-button:disabled {
+.start-button:disabled,
+.xr-button:disabled,
+.session-button:disabled {
   opacity: 0.45;
   cursor: wait;
   transform: none;
@@ -385,6 +421,7 @@ h1 {
 
   .topbar,
   .field-header {
+    grid-template-columns: 1fr;
     flex-direction: column;
     align-items: flex-start;
   }
@@ -405,5 +442,17 @@ h1 {
   .action-grid,
   .stat-grid {
     grid-template-columns: 1fr;
+  }
+
+  .start-actions,
+  .session-actions {
+    width: 100%;
+  }
+
+  .start-button,
+  .xr-button,
+  .session-button {
+    width: 100%;
+    justify-content: center;
   }
 }
