@@ -51,6 +51,12 @@ resource "google_project_iam_member" "gke_nodes_metadata_writer" {
   member  = "serviceAccount:${google_service_account.gke_nodes_sa.email}"
 }
 
+resource "google_project_iam_member" "gke_nodes_artifactregistry_reader" {
+  project = var.project_id
+  role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${google_service_account.gke_nodes_sa.email}"
+}
+
 # IAM bindings for Cloud Build SA to push to Artifact Registry
 resource "google_project_iam_member" "cloudbuild_log_writer" {
   project = var.project_id

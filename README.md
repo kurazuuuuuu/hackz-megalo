@@ -48,6 +48,7 @@
 - Terraform
 	- Github: https://github.com/hashicorp/terraform
 	- Docs: https://developer.hashicorp.com/terraform/docs
+	- Deploy stack: `terraform/gcp/deploy`
 #### Network
 - Cloudflare
 	- Docs: https://developers.cloudflare.com/
@@ -57,6 +58,7 @@
 #### Deployment
 - Google Kubernetes Engine (GKE)
 	- Docs: https://docs.cloud.google.com/kubernetes-engine/docs?hl=ja
+	- Kubernetes secrets: External Secrets Operator + Workload Identity
 - Google Memorystore for Redis
 	- Docs: https://docs.cloud.google.com/memorystore/docs/redis?hl=ja
 - Google Logging
