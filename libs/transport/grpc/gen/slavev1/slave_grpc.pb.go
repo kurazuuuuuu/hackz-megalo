@@ -122,6 +122,7 @@ var ControllerService_ServiceDesc = grpc.ServiceDesc{
 
 const (
 	SlaveService_ExecuteEvent_FullMethodName = "/slave.v1.SlaveService/ExecuteEvent"
+	SlaveService_Shutdown_FullMethodName     = "/slave.v1.SlaveService/Shutdown"
 )
 
 // SlaveServiceClient is the client API for SlaveService service.
@@ -129,6 +130,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type SlaveServiceClient interface {
 	ExecuteEvent(ctx context.Context, in *ExecuteEventRequest, opts ...grpc.CallOption) (*ExecuteEventResponse, error)
+	Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error)
 }
 
 type slaveServiceClient struct {
@@ -149,11 +151,22 @@ func (c *slaveServiceClient) ExecuteEvent(ctx context.Context, in *ExecuteEventR
 	return out, nil
 }
 
+func (c *slaveServiceClient) Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShutdownResponse)
+	err := c.cc.Invoke(ctx, SlaveService_Shutdown_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SlaveServiceServer is the server API for SlaveService service.
 // All implementations must embed UnimplementedSlaveServiceServer
 // for forward compatibility.
 type SlaveServiceServer interface {
 	ExecuteEvent(context.Context, *ExecuteEventRequest) (*ExecuteEventResponse, error)
+	Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error)
 	mustEmbedUnimplementedSlaveServiceServer()
 }
 
@@ -166,6 +179,9 @@ type UnimplementedSlaveServiceServer struct{}
 
 func (UnimplementedSlaveServiceServer) ExecuteEvent(context.Context, *ExecuteEventRequest) (*ExecuteEventResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ExecuteEvent not implemented")
+}
+func (UnimplementedSlaveServiceServer) Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Shutdown not implemented")
 }
 func (UnimplementedSlaveServiceServer) mustEmbedUnimplementedSlaveServiceServer() {}
 func (UnimplementedSlaveServiceServer) testEmbeddedByValue()                      {}
@@ -206,6 +222,24 @@ func _SlaveService_ExecuteEvent_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SlaveService_Shutdown_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShutdownRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SlaveServiceServer).Shutdown(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SlaveService_Shutdown_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SlaveServiceServer).Shutdown(ctx, req.(*ShutdownRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SlaveService_ServiceDesc is the grpc.ServiceDesc for SlaveService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -216,6 +250,10 @@ var SlaveService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExecuteEvent",
 			Handler:    _SlaveService_ExecuteEvent_Handler,
+		},
+		{
+			MethodName: "Shutdown",
+			Handler:    _SlaveService_Shutdown_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

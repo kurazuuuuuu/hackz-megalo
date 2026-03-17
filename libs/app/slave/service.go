@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"sort"
 	"sync"
 	"time"
 
@@ -15,9 +14,11 @@ import (
 
 type Service struct {
 	slavev1.UnimplementedSlaveServiceServer
-	mu                   sync.RWMutex
+	mu                    sync.RWMutex
+	shutdownOnce          sync.Once
 	InitialRemainingTurns int32
-	pods                 map[string]*podState
+	OnShutdown            func(string)
+	pod                   podState
 }
 
 type PodRegistration struct {
@@ -45,156 +46,131 @@ type podState struct {
 	Firewall    bool
 }
 
-func (s *Service) SetupPopulation(basePodID, basePodName, basePodUID, podIP string, podCount int32) {
+func (s *Service) SetupPod(podID, podName, podUID, podIP string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.pods == nil {
-		s.pods = make(map[string]*podState)
-	}
-	count := int(podCount)
-	if count <= 0 {
-		count = 1
-	}
-
-	for i := 0; i < count; i++ {
-		suffix := ""
-		if count > 1 {
-			suffix = fmt.Sprintf("-%02d", i+1)
-		}
-		podID := fmt.Sprintf("%s%s", basePodID, suffix)
-		s.pods[podID] = &podState{
-			PodID:       podID,
-			K8sPodName:  fmt.Sprintf("%s%s", basePodName, suffix),
-			K8sPodUID:   fmt.Sprintf("%s%s", basePodUID, suffix),
-			PodIP:       podIP,
-			Remaining:   s.InitialRemainingTurns,
-			Status:      domain.SlaveStatusLive,
-			DeathReason: domain.DeathReasonUnspecified,
-			ObservedAt:  time.Now().UTC(),
-		}
+	s.pod = podState{
+		PodID:       podID,
+		K8sPodName:  podName,
+		K8sPodUID:   podUID,
+		PodIP:       podIP,
+		Remaining:   s.InitialRemainingTurns,
+		Status:      domain.SlaveStatusLive,
+		DeathReason: domain.DeathReasonUnspecified,
+		ObservedAt:  time.Now().UTC(),
 	}
 }
 
-func (s *Service) UnregisteredPods() []PodRegistration {
+func (s *Service) RegistrationInfo() (PodRegistration, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var out []PodRegistration
-	keys := make([]string, 0, len(s.pods))
-	for podID := range s.pods {
-		keys = append(keys, podID)
+	if s.pod.PodID == "" || s.pod.SlaveID != "" {
+		return PodRegistration{}, false
 	}
-	sort.Strings(keys)
-	for _, podID := range keys {
-		pod := s.pods[podID]
-		if pod.SlaveID != "" {
-			continue
-		}
-		out = append(out, PodRegistration{
-			PodID:       pod.PodID,
-			InitialTurn: s.InitialRemainingTurns,
-			K8SPodName:  pod.K8sPodName,
-			K8SPodUID:   pod.K8sPodUID,
-			PodIP:       pod.PodIP,
-		})
-	}
-	return out
+
+	return PodRegistration{
+		PodID:       s.pod.PodID,
+		InitialTurn: s.InitialRemainingTurns,
+		K8SPodName:  s.pod.K8sPodName,
+		K8SPodUID:   s.pod.K8sPodUID,
+		PodIP:       s.pod.PodIP,
+	}, true
 }
 
-func (s *Service) SetRegistration(podID, slaveID string) {
+func (s *Service) SetRegistration(slaveID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pod, ok := s.pods[podID]; ok {
-		pod.SlaveID = slaveID
-	}
+	s.pod.SlaveID = slaveID
+}
+
+func (s *Service) CurrentState() domain.SlaveState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pod.toDomainState()
+}
+
+func (s *Service) MatchesTarget(target string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pod.matchesTarget(target)
 }
 
 func (s *Service) ExecuteEvent(_ context.Context, req *slavev1.ExecuteEventRequest) (*slavev1.ExecuteEventResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(s.pods) == 0 {
-		return nil, fmt.Errorf("no pod states configured")
+	if s.pod.PodID == "" {
+		return nil, fmt.Errorf("pod state not configured")
 	}
-
-	rng := rand.New(rand.NewSource(req.GetSeed()))
-	target := s.findTargetPodLocked(req.GetTargetPod(), rng)
-	if target == nil {
+	if req.GetTargetPod() != "" && !s.pod.matchesTarget(req.GetTargetPod()) {
 		return nil, fmt.Errorf("target pod not found")
 	}
-	if target.Status == domain.SlaveStatusGone {
+	if s.pod.Status == domain.SlaveStatusGone {
 		return &slavev1.ExecuteEventResponse{
-			Accepted: false,
-			Message:  "target pod already gone",
-			SlaveState: &slavev1.SlaveState{
-				SlaveId:        target.SlaveID,
-				K8SPodName:     target.K8sPodName,
-				K8SPodUid:      target.K8sPodUID,
-				PodIp:          target.PodIP,
-				Status:         toProtoStatus(target.Status),
-				DeathReason:    toProtoDeathReason(target.DeathReason),
-				TurnsLived:     target.TurnsLived,
-				RemainingTurns: target.Remaining,
-				ObservedAt:     time.Now().UTC().Format(time.RFC3339),
-				Stress:         target.Stress,
-				Fear:           target.Fear,
-				Infected:       target.Infected,
-				Firewall:       target.Firewall,
-			},
+			Accepted:   false,
+			Message:    "target pod already gone",
+			SlaveState: s.pod.toProtoState(),
 		}, nil
 	}
 
-	target.tick()
+	rng := rand.New(rand.NewSource(req.GetSeed()))
+	s.pod.tick()
 	switch req.GetEventId() {
 	case 1:
-		target.applyHit(rng)
+		s.pod.applyHit(rng)
 	case 2:
-		target.applyScare(rng)
+		s.pod.applyScare(rng)
 	case 3:
-		target.applyInfection(rng)
+		s.pod.applyInfection(rng)
 	case 4:
-		target.applyFirewall(rng)
+		s.pod.applyFirewall(rng)
 	default:
-		target.recover()
+		s.pod.recover()
 	}
 
-	target.mutateLife(rng)
-	target.ObservedAt = time.Now().UTC()
+	s.pod.mutateLife(rng)
+	s.pod.ObservedAt = time.Now().UTC()
 
 	return &slavev1.ExecuteEventResponse{
-		Accepted:   target.Status == domain.SlaveStatusLive || target.Status == domain.SlaveStatusTerminating,
-		Message:    describePodState(target),
-		SlaveState: target.toProtoState(),
+		Accepted:   s.pod.Status == domain.SlaveStatusLive || s.pod.Status == domain.SlaveStatusTerminating,
+		Message:    describePodState(&s.pod),
+		SlaveState: s.pod.toProtoState(),
 	}, nil
 }
 
-func (s *Service) findTargetPodLocked(target string, rng *rand.Rand) *podState {
-	if target != "" {
-		if pod, ok := s.pods[target]; ok {
-			return pod
-		}
+func (s *Service) Shutdown(_ context.Context, req *slavev1.ShutdownRequest) (*slavev1.ShutdownResponse, error) {
+	if s.OnShutdown != nil {
+		s.shutdownOnce.Do(func() {
+			go s.OnShutdown(req.GetReason())
+		})
 	}
-	keys := make([]string, 0, len(s.pods))
-	for podID := range s.pods {
-		keys = append(keys, podID)
-	}
-	sort.Strings(keys)
-	return s.pods[keys[rng.Intn(len(keys))]]
+
+	return &slavev1.ShutdownResponse{Accepted: true}, nil
 }
 
-func (s *Service) pickOtherPodLocked(exclude string, rng *rand.Rand) *podState {
-	candidates := make([]*podState, 0, len(s.pods)-1)
-	for _, pod := range s.pods {
-		if pod.PodID == exclude || pod.Status == domain.SlaveStatusGone {
-			continue
-		}
-		candidates = append(candidates, pod)
+func (p *podState) matchesTarget(target string) bool {
+	return target == p.PodID || target == p.SlaveID || target == p.K8sPodName || target == p.PodIP
+}
+
+func (p *podState) toDomainState() domain.SlaveState {
+	return domain.SlaveState{
+		SlaveID:        p.SlaveID,
+		K8sPodName:     p.K8sPodName,
+		K8sPodUID:      p.K8sPodUID,
+		PodIP:          p.PodIP,
+		Status:         p.Status,
+		DeathReason:    p.DeathReason,
+		TurnsLived:     p.TurnsLived,
+		RemainingTurns: p.Remaining,
+		Stress:         p.Stress,
+		Fear:           p.Fear,
+		Infected:       p.Infected,
+		Firewall:       p.Firewall,
+		ObservedAt:     p.ObservedAt,
+		Source:         "slave-service",
 	}
-	if len(candidates) == 0 {
-		return nil
-	}
-	return candidates[rng.Intn(len(candidates))]
 }
 
 func (p *podState) toProtoState() *slavev1.SlaveState {
@@ -264,15 +240,6 @@ func (p *podState) applyFirewall(rng *rand.Rand) {
 func (p *podState) recover() {
 	p.Stress = maxInt32(p.Stress-1, 0)
 	p.Fear = maxInt32(p.Fear-2, 0)
-}
-
-func (p *podState) spreadInfection(seed *rand.Rand, spreadTarget *podState) {
-	if spreadTarget == nil {
-		return
-	}
-	spreadTarget.Infected = true
-	spreadTarget.Stress += int32(seed.Intn(6))
-	spreadTarget.Fear += int32(4 + seed.Intn(7))
 }
 
 func (p *podState) mutateLife(seed *rand.Rand) {

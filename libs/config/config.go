@@ -17,16 +17,15 @@ type MasterConfig struct {
 }
 
 type ControllerConfig struct {
-	GRPCAddr        string
-	Redis           RedisConfig
-	SlaveGRPCTarget string
+	GRPCAddr      string
+	Redis         RedisConfig
+	SlaveGRPCPort string
 }
 
 type SlaveConfig struct {
 	GRPCAddr              string
 	ControllerGRPCTarget  string
 	PodID                 string
-	PodCount              int32
 	K8sPodName            string
 	K8sPodUID             string
 	PodIP                 string
@@ -53,13 +52,13 @@ func LoadController() (ControllerConfig, error) {
 			EventsChannel: envOrDefault("CONTROLLER_REDIS_EVENTS_CHANNEL", "game.events"),
 			StatesChannel: envOrDefault("CONTROLLER_REDIS_STATES_CHANNEL", "slave.states"),
 		},
-		SlaveGRPCTarget: envOrDefault("CONTROLLER_SLAVE_GRPC_TARGET", "localhost:50051"),
+		SlaveGRPCPort: envOrDefault("CONTROLLER_SLAVE_GRPC_PORT", "50051"),
 	}
 	if cfg.GRPCAddr == "" {
 		return ControllerConfig{}, fmt.Errorf("CONTROLLER_GRPC_ADDR is required")
 	}
-	if cfg.SlaveGRPCTarget == "" {
-		return ControllerConfig{}, fmt.Errorf("CONTROLLER_SLAVE_GRPC_TARGET is required")
+	if cfg.SlaveGRPCPort == "" {
+		return ControllerConfig{}, fmt.Errorf("CONTROLLER_SLAVE_GRPC_PORT is required")
 	}
 	return cfg, validateRedis(cfg.Redis)
 }
@@ -74,16 +73,10 @@ func LoadSlave() (SlaveConfig, error) {
 		podID = hostname
 	}
 
-	podCount := envOrDefaultInt32("SLAVE_POD_COUNT", 20)
-	if podCount <= 0 {
-		podCount = 1
-	}
-
 	cfg := SlaveConfig{
 		GRPCAddr:              envOrDefault("SLAVE_GRPC_ADDR", ":50051"),
 		ControllerGRPCTarget:  envOrDefault("SLAVE_CONTROLLER_GRPC_TARGET", "localhost:50052"),
 		PodID:                 podID,
-		PodCount:              podCount,
 		K8sPodName:            envOrDefault("SLAVE_K8S_POD_NAME", "slave-service-0"),
 		K8sPodUID:             envOrDefault("SLAVE_K8S_POD_UID", "slave-service-0-uid"),
 		PodIP:                 envOrDefault("SLAVE_POD_IP", "127.0.0.1"),

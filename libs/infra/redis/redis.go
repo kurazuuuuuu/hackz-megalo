@@ -289,6 +289,10 @@ func ToProtoSlaveState(state domain.SlaveState) *slavev1.SlaveState {
 		TurnsLived:     state.TurnsLived,
 		RemainingTurns: state.RemainingTurns,
 		ObservedAt:     state.ObservedAt.Format(time.RFC3339),
+		Stress:         state.Stress,
+		Fear:           state.Fear,
+		Infected:       state.Infected,
+		Firewall:       state.Firewall,
 	}
 }
 
@@ -314,6 +318,10 @@ func FromProtoSlaveState(state *slavev1.SlaveState, source string) domain.SlaveS
 		DeathReason:    fromProtoDeathReason(state.GetDeathReason()),
 		TurnsLived:     state.GetTurnsLived(),
 		RemainingTurns: state.GetRemainingTurns(),
+		Stress:         state.GetStress(),
+		Fear:           state.GetFear(),
+		Infected:       state.GetInfected(),
+		Firewall:       state.GetFirewall(),
 		ObservedAt:     observedAt,
 		Source:         source,
 	}

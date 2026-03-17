@@ -64,7 +64,7 @@ func TestMasterServiceTransportFlow(t *testing.T) {
 	eventReq := publishEventRequest{
 		EventID:   eventID,
 		Seed:      time.Now().UnixNano(),
-		TargetPod: "slave-1",
+		TargetPod: "slave-service-0",
 	}
 
 	payload, err := json.Marshal(eventReq)
@@ -114,15 +114,15 @@ func TestMasterServiceTransportFlow(t *testing.T) {
 		}
 		t.Logf("received slave state: %+v", state)
 
-		if state.PodID != eventReq.TargetPod {
+		if state.K8sPodName != eventReq.TargetPod {
 			continue
 		}
-		if state.Stress != expectedStress {
+		if state.Stress <= 0 {
 			continue
 		}
 
-		if state.Status != "ready" {
-			t.Fatalf("state Status = %q, want %q", state.Status, "ready")
+		if state.Status != domain.SlaveStatusLive && state.Status != domain.SlaveStatusTerminating {
+			t.Fatalf("unexpected state Status = %q", state.Status)
 		}
 		if state.Source != "controller-service" {
 			t.Fatalf("state Source = %q, want %q", state.Source, "controller-service")

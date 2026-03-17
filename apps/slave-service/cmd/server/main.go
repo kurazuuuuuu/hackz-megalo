@@ -25,16 +25,22 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	runtimeCtx, shutdown := context.WithCancel(ctx)
+	defer shutdown()
 
 	service := &slaveapp.Service{
 		InitialRemainingTurns: cfg.InitialRemainingTurns,
+		OnShutdown: func(reason string) {
+			log.Printf("shutdown requested for pod %s: %s", cfg.PodID, reason)
+			shutdown()
+		},
 	}
-	service.SetupPopulation(cfg.PodID, cfg.K8sPodName, cfg.K8SPodUID, cfg.PodIP, cfg.PodCount)
+	service.SetupPod(cfg.PodID, cfg.K8sPodName, cfg.K8sPodUID, cfg.PodIP)
 
-	go registerWithController(ctx, cfg, service)
+	go registerWithController(runtimeCtx, cfg, service)
 
-	log.Printf("slave-service listening on %s with %d simulated pods", cfg.GRPCAddr, cfg.PodCount)
-	if err := grpcserver.ListenAndServe(ctx, grpcserver.Config{
+	log.Printf("slave-service listening on %s for pod %s", cfg.GRPCAddr, cfg.PodID)
+	if err := grpcserver.ListenAndServe(runtimeCtx, grpcserver.Config{
 		Addr: cfg.GRPCAddr,
 		Register: func(server grpc.ServiceRegistrar) {
 			slavev1.RegisterSlaveServiceServer(server, service)
@@ -52,47 +58,40 @@ func registerWithController(ctx context.Context, cfg config.SlaveConfig, service
 		default:
 		}
 
-		pendingPods := service.UnregisteredPods()
-		if len(pendingPods) == 0 {
+		pod, ok := service.RegistrationInfo()
+		if !ok {
 			return
 		}
 
-		failed := false
-		for _, pod := range pendingPods {
-			conn, err := grpc.DialContext(
-				ctx,
-				cfg.ControllerGRPCTarget,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-			)
-			if err != nil {
-				log.Printf("dial controller grpc: %v", err)
-				failed = true
-				continue
-			}
-
-			client := slavev1.NewControllerServiceClient(conn)
-			registrationCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			resp, err := client.RegisterSlave(registrationCtx, &slavev1.RegisterSlaveRequest{
-				K8SPodName:            pod.K8SPodName,
-				K8SPodUid:             pod.K8SPodUID,
-				PodIp:                 pod.PodIP,
-				InitialRemainingTurns: pod.InitialTurn,
-			})
-			cancel()
-			_ = conn.Close()
-			if err != nil {
-				log.Printf("register slave %s: %v", pod.PodID, err)
-				failed = true
-				continue
-			}
-
-			service.SetRegistration(pod.PodID, resp.GetSlaveId())
-			log.Printf("registered pod %s as slave_id=%s", pod.PodID, resp.GetSlaveId())
+		conn, err := grpc.DialContext(
+			ctx,
+			cfg.ControllerGRPCTarget,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			log.Printf("dial controller grpc: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
 		}
 
-		if !failed {
-			return
+		client := slavev1.NewControllerServiceClient(conn)
+		registrationCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		resp, err := client.RegisterSlave(registrationCtx, &slavev1.RegisterSlaveRequest{
+			K8SPodName:            pod.K8SPodName,
+			K8SPodUid:             pod.K8SPodUID,
+			PodIp:                 pod.PodIP,
+			InitialRemainingTurns: pod.InitialTurn,
+		})
+		cancel()
+		_ = conn.Close()
+		if err != nil {
+			log.Printf("register slave %s: %v", pod.PodID, err)
+			time.Sleep(2 * time.Second)
+			continue
 		}
-		time.Sleep(2 * time.Second)
+
+		service.SetRegistration(resp.GetSlaveId())
+		log.Printf("registered pod %s as slave_id=%s", pod.PodID, resp.GetSlaveId())
+		return
 	}
 }

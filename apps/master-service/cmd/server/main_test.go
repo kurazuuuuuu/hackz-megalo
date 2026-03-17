@@ -243,6 +243,30 @@ func TestWebSocketSessionLifecycleAndSingleClient(t *testing.T) {
 	t.Fatalf("active session should be cleaned up after websocket close")
 }
 
+func TestWithCORSAddsHeadersAndOptions(t *testing.T) {
+	handler := withCORS(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "*")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, OPTIONS" {
+		t.Fatalf("Access-Control-Allow-Methods = %q, want %q", got, "GET, POST, OPTIONS")
+	}
+
+	optionsReq := httptest.NewRequest(http.MethodOptions, "/events", nil)
+	optionsRec := httptest.NewRecorder()
+	handler.ServeHTTP(optionsRec, optionsReq)
+	if optionsRec.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS status = %d, want %d", optionsRec.Code, http.StatusNoContent)
+	}
+}
+
 func newTestMasterServer(t *testing.T) *masterServer {
 	t.Helper()
 

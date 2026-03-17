@@ -10,6 +10,7 @@ service ControllerService {
 
 service SlaveService {
   rpc ExecuteEvent(ExecuteEventRequest) returns (ExecuteEventResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 message RegisterSlaveRequest {
@@ -36,6 +37,14 @@ message ExecuteEventResponse {
   SlaveState slave_state = 3;
 }
 
+message ShutdownRequest {
+  string reason = 1;
+}
+
+message ShutdownResponse {
+  bool accepted = 1;
+}
+
 message SlaveState {
   string session_id = 1;
   string slave_id = 2;
@@ -47,6 +56,10 @@ message SlaveState {
   int32 turns_lived = 8;
   int32 remaining_turns = 9;
   string observed_at = 10;
+  int32 stress = 11;
+  int32 fear = 12;
+  bool infected = 13;
+  bool firewall = 14;
 }
 
 enum SlaveStatus {

@@ -3,25 +3,22 @@ package slaveapp
 import (
 	"context"
 	"testing"
+	"time"
 
 	slavev1 "github.com/kurazuuuuuu/hackz-megalo/libs/transport/grpc/gen/slavev1"
 )
 
 func TestExecuteEvent(t *testing.T) {
 	service := &Service{
-		SlaveID:        "slave-id-1",
-		PodID:          "slave-1",
-		K8sPodName:     "slave-service-0",
-		K8sPodUID:      "uid-1",
-		PodIP:          "10.0.0.10",
-		TurnsLived:     0,
-		RemainingTurns: 3,
+		InitialRemainingTurns: 3,
 	}
+	service.SetupPod("slave-1", "slave-service-0", "uid-1", "10.0.0.10")
+	service.SetRegistration("slave-id-1")
 
 	resp, err := service.ExecuteEvent(context.Background(), &slavev1.ExecuteEventRequest{
 		EventId:   4,
 		Seed:      11,
-		TargetPod: "slave-1",
+		TargetPod: "slave-id-1",
 	})
 	if err != nil {
 		t.Fatalf("ExecuteEvent() error = %v", err)
@@ -32,10 +29,55 @@ func TestExecuteEvent(t *testing.T) {
 	if resp.GetSlaveState().GetSlaveId() != "slave-id-1" {
 		t.Fatalf("SlaveId = %q, want %q", resp.GetSlaveState().GetSlaveId(), "slave-id-1")
 	}
-	if resp.GetSlaveState().GetStatus() != slavev1.SlaveStatus_SLAVE_STATUS_LIVE {
-		t.Fatalf("unexpected status: %v", resp.GetSlaveState().GetStatus())
+	if resp.GetSlaveState().GetFirewall() != true {
+		t.Fatalf("Firewall = false, want true")
 	}
-	if resp.GetSlaveState().GetTurnsLived() != 1 {
-		t.Fatalf("TurnsLived = %d, want %d", resp.GetSlaveState().GetTurnsLived(), 1)
+}
+
+func TestExecuteEventTargetsSinglePod(t *testing.T) {
+	service := &Service{
+		InitialRemainingTurns: 3,
+	}
+	service.SetupPod("slave-1", "slave-service-0", "uid-1", "10.0.0.10")
+	service.SetRegistration("slave-id-1")
+
+	_, err := service.ExecuteEvent(context.Background(), &slavev1.ExecuteEventRequest{
+		EventId:   2,
+		Seed:      11,
+		TargetPod: "another-slave",
+	})
+	if err == nil {
+		t.Fatalf("ExecuteEvent() error = nil, want target pod not found")
+	}
+}
+
+func TestShutdownInvokesCallbackOnce(t *testing.T) {
+	calls := make(chan string, 2)
+	service := &Service{
+		OnShutdown: func(reason string) {
+			calls <- reason
+		},
+	}
+
+	if _, err := service.Shutdown(context.Background(), &slavev1.ShutdownRequest{Reason: "gone"}); err != nil {
+		t.Fatalf("Shutdown() first error = %v", err)
+	}
+	if _, err := service.Shutdown(context.Background(), &slavev1.ShutdownRequest{Reason: "ignored"}); err != nil {
+		t.Fatalf("Shutdown() second error = %v", err)
+	}
+
+	select {
+	case reason := <-calls:
+		if reason != "gone" {
+			t.Fatalf("reason = %q, want %q", reason, "gone")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown callback was not invoked")
+	}
+
+	select {
+	case reason := <-calls:
+		t.Fatalf("unexpected second callback with reason %q", reason)
+	default:
 	}
 }

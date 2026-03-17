@@ -22,21 +22,49 @@ import (
 	redislayer "github.com/kurazuuuuuu/hackz-megalo/libs/infra/redis"
 )
 
+const (
+	websocketWriteWait  = 5 * time.Second
+	websocketPongWait   = 30 * time.Second
+	websocketPingPeriod = 10 * time.Second
+)
+
+type websocketClient struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *websocketClient) writeJSON(v any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(websocketWriteWait)); err != nil {
+		return err
+	}
+	return c.conn.WriteJSON(v)
+}
+
+func (c *websocketClient) writeControl(messageType int, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteControl(messageType, data, time.Now().Add(websocketWriteWait))
+}
+
 type websocketHub struct {
 	mu    sync.Mutex
-	conns map[*websocket.Conn]struct{}
+	conns map[*websocket.Conn]*websocketClient
 }
 
 func newWebsocketHub() *websocketHub {
 	return &websocketHub{
-		conns: make(map[*websocket.Conn]struct{}),
+		conns: make(map[*websocket.Conn]*websocketClient),
 	}
 }
 
-func (h *websocketHub) add(conn *websocket.Conn) {
+func (h *websocketHub) add(conn *websocket.Conn) *websocketClient {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.conns[conn] = struct{}{}
+	client := &websocketClient{conn: conn}
+	h.conns[conn] = client
+	return client
 }
 
 func (h *websocketHub) remove(conn *websocket.Conn) {
@@ -49,8 +77,8 @@ func (h *websocketHub) remove(conn *websocket.Conn) {
 func (h *websocketHub) broadcast(v any) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for conn := range h.conns {
-		if err := conn.WriteJSON(v); err != nil {
+	for conn, client := range h.conns {
+		if err := client.writeJSON(v); err != nil {
 			_ = conn.Close()
 			delete(h.conns, conn)
 		}
@@ -182,7 +210,7 @@ func main() {
 			return
 		}
 
-		serverState.hub.add(conn)
+		client := serverState.hub.add(conn)
 		defer func() {
 			serverState.hub.remove(conn)
 			if err := serverState.endSession(context.Background(), sessionMeta.SessionID); err != nil {
@@ -190,6 +218,31 @@ func main() {
 			}
 			serverState.releaseSessionSlot(sessionMeta.SessionID)
 		}()
+
+		if err := conn.SetReadDeadline(time.Now().Add(websocketPongWait)); err != nil {
+			return
+		}
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(websocketPongWait))
+		})
+
+		pingDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(websocketPingPeriod)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pingDone:
+					return
+				case <-ticker.C:
+					if err := client.writeControl(websocket.PingMessage, nil); err != nil {
+						_ = conn.Close()
+						return
+					}
+				}
+			}
+		}()
+		defer close(pingDone)
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -200,7 +253,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           withCORS(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -380,4 +433,19 @@ func (s *masterServer) subscribeStateUpdates(ctx context.Context) {
 			s.hub.broadcast(state)
 		}
 	}
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }

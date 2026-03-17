@@ -21,16 +21,16 @@ func TestLoadMasterDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadControllerRequiresTarget(t *testing.T) {
+func TestLoadControllerDefaults(t *testing.T) {
 	t.Setenv("CONTROLLER_GRPC_ADDR", "")
-	t.Setenv("CONTROLLER_SLAVE_GRPC_TARGET", "")
+	t.Setenv("CONTROLLER_SLAVE_GRPC_PORT", "")
 
 	cfg, err := LoadController()
 	if err != nil {
 		t.Fatalf("LoadController() unexpectedly errored: %v", err)
 	}
-	if cfg.SlaveGRPCTarget != "localhost:50051" {
-		t.Fatalf("SlaveGRPCTarget = %q, want %q", cfg.SlaveGRPCTarget, "localhost:50051")
+	if cfg.SlaveGRPCPort != "50051" {
+		t.Fatalf("SlaveGRPCPort = %q, want %q", cfg.SlaveGRPCPort, "50051")
 	}
 	if cfg.GRPCAddr != ":50052" {
 		t.Fatalf("GRPCAddr = %q, want %q", cfg.GRPCAddr, ":50052")
