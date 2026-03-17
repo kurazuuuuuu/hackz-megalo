@@ -1,0 +1,11 @@
+## 1. Implementation
+- [x] 1.1 Add OpenSpec delta for WebXR hand-tracking play mode
+- [x] 1.2 Add frontend UI controls for entering and leaving WebXR mode
+- [x] 1.3 Implement immersive passthrough WebXR session management for Meta Quest Browser
+- [x] 1.4 Implement tabletop Pod board rendering, movement, and fall-off death handling in XR
+- [x] 1.5 Implement left wrist HUD with session metrics and disconnect control in XR
+- [x] 1.6 Preserve desktop fallback behavior and existing WebSocket-backed gameplay flow
+- [x] 1.7 Add authoritative frontend `GONE` state updates over WebSocket
+- [x] 1.8 Make `master-service` overwrite Redis state from frontend updates
+- [x] 1.9 Make `controller-service` react to Redis `GONE` transitions and dispatch shutdown
+- [x] 1.10 Validate frontend build and XR fallback behavior, then mark tasks complete
