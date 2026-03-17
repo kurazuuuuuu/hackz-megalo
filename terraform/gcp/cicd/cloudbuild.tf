@@ -8,6 +8,16 @@ locals {
 }
 
 # Cloud Build v2 Connection to GitHub
+data "google_secret_manager_secret" "github_token" {
+  secret_id = "github-token-secret"
+}
+
+resource "google_secret_manager_secret_iam_member" "github_token_cloudbuild_service_agent" {
+  secret_id = data.google_secret_manager_secret.github_token.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${local.cloudbuild_service_agent}"
+}
+
 resource "google_cloudbuildv2_connection" "github_conn" {
   location = var.region
   name     = "github-connection"
@@ -24,6 +34,10 @@ resource "google_cloudbuildv2_connection" "github_conn" {
       github_config[0].authorizer_credential
     ]
   }
+
+  depends_on = [
+    google_secret_manager_secret_iam_member.github_token_cloudbuild_service_agent
+  ]
 }
 
 resource "google_cloudbuildv2_repository" "github_repo" {
@@ -38,20 +52,21 @@ resource "google_cloudbuildv2_repository" "github_repo" {
 resource "google_cloudbuild_trigger" "pr_trigger" {
   for_each = toset(local.apps)
 
-  location    = var.region
-  name        = "${each.key}-pr-trigger"
-  description = "Trigger for PRs modifying ${each.key}"
+  location        = var.region
+  name            = "${each.key}-pr-trigger"
+  description     = "Trigger for PRs modifying ${each.key}"
+  service_account = "projects/${var.project_id}/serviceAccounts/${local.cloudbuild_sa}"
 
   repository_event_config {
     repository = google_cloudbuildv2_repository.github_repo.id
     pull_request {
-      branch = "^main$"
+      branch = ".*main.*"
     }
   }
 
-  included_files = [
-    "apps/${each.key}/**"
-  ]
+  # included_files = [
+  #   "apps/${each.key}/**"
+  # ]
 
   build {
     step {
@@ -94,20 +109,21 @@ resource "google_cloudbuild_trigger" "pr_trigger" {
 resource "google_cloudbuild_trigger" "push_trigger" {
   for_each = toset(local.apps)
 
-  location    = var.region
-  name        = "${each.key}-main-trigger"
-  description = "Trigger for pushes to main modifying ${each.key}"
+  location        = var.region
+  name            = "${each.key}-main-trigger"
+  description     = "Trigger for pushes to main modifying ${each.key}"
+  service_account = "projects/${var.project_id}/serviceAccounts/${local.cloudbuild_sa}"
 
   repository_event_config {
     repository = google_cloudbuildv2_repository.github_repo.id
     push {
-      branch = "^main$"
+      branch = ".*main.*"
     }
   }
 
-  included_files = [
-    "apps/${each.key}/**"
-  ]
+  # included_files = [
+  #   "apps/${each.key}/**"
+  # ]
 
   build {
     step {

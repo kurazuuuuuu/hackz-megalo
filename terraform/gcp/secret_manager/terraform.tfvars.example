@@ -1,0 +1,10 @@
+project_id = "your-gcp-project-id"
+region     = "asia-northeast1"
+
+# Define your secrets here.
+# Note: Since terraform.tfvars contains actual secret data, make sure NOT to commit the actual terraform.tfvars file to version control.
+secrets = {
+  "github-token-secret"  = "your_github_token"
+  "vite-api-base-url" = "your_api_url"
+  "vite-ws-url" = "your_websocket_url"
+}
