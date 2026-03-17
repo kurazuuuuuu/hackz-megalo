@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -18,6 +19,8 @@ type Client struct {
 	eventsChannel string
 	statesChannel string
 }
+
+const activeSessionKey = "session:active"
 
 func New(addr, eventsChannel, statesChannel string) *Client {
 	return &Client{
@@ -38,12 +41,16 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) PublishEvent(ctx context.Context, event domain.Event) error {
+	if strings.TrimSpace(event.SessionID) == "" {
+		return fmt.Errorf("session_id is required")
+	}
+
 	payload, err := marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
 
-	key := fmt.Sprintf("game:event:%d", event.CreatedAt.UnixNano())
+	key := fmt.Sprintf("session:%s:event:%d", event.SessionID, event.CreatedAt.UnixNano())
 	if err := c.raw.Set(ctx, key, payload, 10*time.Minute).Err(); err != nil {
 		return fmt.Errorf("set event: %w", err)
 	}
@@ -53,13 +60,110 @@ func (c *Client) PublishEvent(ctx context.Context, event domain.Event) error {
 	return nil
 }
 
+func (c *Client) CreateSession(ctx context.Context, meta domain.SessionMeta) error {
+	if strings.TrimSpace(meta.SessionID) == "" {
+		return fmt.Errorf("session_id is required")
+	}
+
+	if meta.StartedAt.IsZero() {
+		meta.StartedAt = time.Now().UTC()
+	}
+
+	metrics := domain.SessionMetrics{
+		SessionID:  meta.SessionID,
+		LiveSlaves: 0,
+		GoneSlaves: 0,
+		UpdatedAt:  meta.StartedAt,
+	}
+
+	metaPayload, err := marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal session meta: %w", err)
+	}
+	metricsPayload, err := marshal(metrics)
+	if err != nil {
+		return fmt.Errorf("marshal session metrics: %w", err)
+	}
+
+	pipe := c.raw.TxPipeline()
+	pipe.Set(ctx, sessionMetaKey(meta.SessionID), metaPayload, 0)
+	pipe.Set(ctx, sessionMetricsKey(meta.SessionID), metricsPayload, 0)
+	pipe.Set(ctx, activeSessionKey, meta.SessionID, 0)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) GetActiveSessionID(ctx context.Context) (string, error) {
+	sessionID, err := c.raw.Get(ctx, activeSessionKey).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			return "", fmt.Errorf("active session not found")
+		}
+		return "", fmt.Errorf("get active session: %w", err)
+	}
+	return sessionID, nil
+}
+
+func (c *Client) GetSessionMeta(ctx context.Context, sessionID string) (domain.SessionMeta, error) {
+	payload, err := c.raw.Get(ctx, sessionMetaKey(sessionID)).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			return domain.SessionMeta{}, fmt.Errorf("session meta not found: %s", sessionID)
+		}
+		return domain.SessionMeta{}, fmt.Errorf("get session meta: %w", err)
+	}
+	return DecodeSessionMeta(payload)
+}
+
+func (c *Client) GetSessionMetrics(ctx context.Context, sessionID string) (domain.SessionMetrics, error) {
+	payload, err := c.raw.Get(ctx, sessionMetricsKey(sessionID)).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			return domain.SessionMetrics{}, fmt.Errorf("session metrics not found: %s", sessionID)
+		}
+		return domain.SessionMetrics{}, fmt.Errorf("get session metrics: %w", err)
+	}
+	return DecodeSessionMetrics(payload)
+}
+
+func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
+	keys, err := c.raw.Keys(ctx, sessionSlavePattern(sessionID)).Result()
+	if err != nil {
+		return fmt.Errorf("list session slave keys: %w", err)
+	}
+
+	activeSessionID, err := c.raw.Get(ctx, activeSessionKey).Result()
+	if err != nil && err != goredis.Nil {
+		return fmt.Errorf("get active session before delete: %w", err)
+	}
+
+	pipe := c.raw.TxPipeline()
+	if activeSessionID == sessionID {
+		pipe.Del(ctx, activeSessionKey)
+	}
+	pipe.Del(ctx, sessionMetaKey(sessionID), sessionMetricsKey(sessionID))
+	if len(keys) > 0 {
+		pipe.Del(ctx, keys...)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) PublishSlaveState(ctx context.Context, state domain.SlaveState) error {
+	if strings.TrimSpace(state.SessionID) == "" {
+		return fmt.Errorf("session_id is required")
+	}
+
 	payload, err := marshal(state)
 	if err != nil {
 		return fmt.Errorf("marshal slave state: %w", err)
 	}
 
-	key := fmt.Sprintf("slave:state:%s", state.SlaveID)
+	key := sessionSlaveKey(state.SessionID, state.SlaveID)
 	if err := c.raw.Set(ctx, key, payload, 0).Err(); err != nil {
 		return fmt.Errorf("set slave state: %w", err)
 	}
@@ -77,8 +181,8 @@ func (c *Client) SubscribeStates(ctx context.Context) *goredis.PubSub {
 	return c.raw.Subscribe(ctx, c.statesChannel)
 }
 
-func (c *Client) GetSlaveState(ctx context.Context, slaveID string) (domain.SlaveState, error) {
-	key := fmt.Sprintf("slave:state:%s", slaveID)
+func (c *Client) GetSlaveState(ctx context.Context, sessionID, slaveID string) (domain.SlaveState, error) {
+	key := sessionSlaveKey(sessionID, slaveID)
 	payload, err := c.raw.Get(ctx, key).Result()
 	if err != nil {
 		if err == goredis.Nil {
@@ -89,8 +193,8 @@ func (c *Client) GetSlaveState(ctx context.Context, slaveID string) (domain.Slav
 	return DecodeSlaveState(payload)
 }
 
-func (c *Client) ListSlaveStates(ctx context.Context) ([]domain.SlaveState, error) {
-	keys, err := c.raw.Keys(ctx, "slave:state:*").Result()
+func (c *Client) ListSlaveStates(ctx context.Context, sessionID string) ([]domain.SlaveState, error) {
+	keys, err := c.raw.Keys(ctx, sessionSlavePattern(sessionID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("list slave state keys: %w", err)
 	}
@@ -111,6 +215,28 @@ func (c *Client) ListSlaveStates(ctx context.Context) ([]domain.SlaveState, erro
 	return states, nil
 }
 
+func (c *Client) UpdateSessionMetrics(ctx context.Context, sessionID string, fn func(domain.SessionMetrics) domain.SessionMetrics) (domain.SessionMetrics, error) {
+	metrics, err := c.GetSessionMetrics(ctx, sessionID)
+	if err != nil {
+		return domain.SessionMetrics{}, err
+	}
+
+	metrics = fn(metrics)
+	if metrics.SessionID == "" {
+		metrics.SessionID = sessionID
+	}
+	metrics.UpdatedAt = time.Now().UTC()
+
+	payload, err := marshal(metrics)
+	if err != nil {
+		return domain.SessionMetrics{}, fmt.Errorf("marshal session metrics: %w", err)
+	}
+	if err := c.raw.Set(ctx, sessionMetricsKey(sessionID), payload, 0).Err(); err != nil {
+		return domain.SessionMetrics{}, fmt.Errorf("set session metrics: %w", err)
+	}
+	return metrics, nil
+}
+
 func DecodeEvent(payload string) (domain.Event, error) {
 	var event domain.Event
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
@@ -127,6 +253,22 @@ func DecodeSlaveState(payload string) (domain.SlaveState, error) {
 	return state, nil
 }
 
+func DecodeSessionMeta(payload string) (domain.SessionMeta, error) {
+	var meta domain.SessionMeta
+	if err := json.Unmarshal([]byte(payload), &meta); err != nil {
+		return domain.SessionMeta{}, fmt.Errorf("decode session meta: %w", err)
+	}
+	return meta, nil
+}
+
+func DecodeSessionMetrics(payload string) (domain.SessionMetrics, error) {
+	var metrics domain.SessionMetrics
+	if err := json.Unmarshal([]byte(payload), &metrics); err != nil {
+		return domain.SessionMetrics{}, fmt.Errorf("decode session metrics: %w", err)
+	}
+	return metrics, nil
+}
+
 func marshal(v any) (string, error) {
 	payload, err := json.Marshal(v)
 	if err != nil {
@@ -137,6 +279,7 @@ func marshal(v any) (string, error) {
 
 func ToProtoSlaveState(state domain.SlaveState) *slavev1.SlaveState {
 	return &slavev1.SlaveState{
+		SessionId:      state.SessionID,
 		SlaveId:        state.SlaveID,
 		K8SPodName:     state.K8sPodName,
 		K8SPodUid:      state.K8sPodUID,
@@ -162,6 +305,7 @@ func FromProtoSlaveState(state *slavev1.SlaveState, source string) domain.SlaveS
 	}
 
 	return domain.SlaveState{
+		SessionID:      state.GetSessionId(),
 		SlaveID:        state.GetSlaveId(),
 		K8sPodName:     state.GetK8SPodName(),
 		K8sPodUID:      state.GetK8SPodUid(),
@@ -173,6 +317,22 @@ func FromProtoSlaveState(state *slavev1.SlaveState, source string) domain.SlaveS
 		ObservedAt:     observedAt,
 		Source:         source,
 	}
+}
+
+func sessionMetaKey(sessionID string) string {
+	return fmt.Sprintf("session:%s:meta", sessionID)
+}
+
+func sessionMetricsKey(sessionID string) string {
+	return fmt.Sprintf("session:%s:metrics", sessionID)
+}
+
+func sessionSlaveKey(sessionID, slaveID string) string {
+	return fmt.Sprintf("session:%s:slave:%s", sessionID, slaveID)
+}
+
+func sessionSlavePattern(sessionID string) string {
+	return fmt.Sprintf("session:%s:slave:*", sessionID)
 }
 
 func toProtoStatus(status domain.SlaveStatus) slavev1.SlaveStatus {

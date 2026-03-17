@@ -37,15 +37,16 @@ message ExecuteEventResponse {
 }
 
 message SlaveState {
-  string slave_id = 1;
-  string k8s_pod_name = 2;
-  string k8s_pod_uid = 3;
-  string pod_ip = 4;
-  SlaveStatus status = 5;
-  DeathReason death_reason = 6;
-  int32 turns_lived = 7;
-  int32 remaining_turns = 8;
-  string observed_at = 9;
+  string session_id = 1;
+  string slave_id = 2;
+  string k8s_pod_name = 3;
+  string k8s_pod_uid = 4;
+  string pod_ip = 5;
+  SlaveStatus status = 6;
+  DeathReason death_reason = 7;
+  int32 turns_lived = 8;
+  int32 remaining_turns = 9;
+  string observed_at = 10;
 }
 
 enum SlaveStatus {

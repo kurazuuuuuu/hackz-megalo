@@ -26,11 +26,25 @@ type Event struct {
 	EventID   int32     `json:"event_id"`
 	Seed      int64     `json:"seed"`
 	TargetPod string    `json:"target_pod"`
+	SessionID string    `json:"session_id"`
 	Source    string    `json:"source"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type SessionMeta struct {
+	SessionID string    `json:"session_id"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+type SessionMetrics struct {
+	SessionID  string    `json:"session_id"`
+	LiveSlaves int32     `json:"live_slaves"`
+	GoneSlaves int32     `json:"gone_slaves"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 type SlaveState struct {
+	SessionID      string      `json:"session_id"`
 	SlaveID        string      `json:"slave_id"`
 	K8sPodName     string      `json:"k8s_pod_name"`
 	K8sPodUID      string      `json:"k8s_pod_uid"`
@@ -39,6 +53,10 @@ type SlaveState struct {
 	DeathReason    DeathReason `json:"death_reason"`
 	TurnsLived     int32       `json:"turns_lived"`
 	RemainingTurns int32       `json:"remaining_turns"`
+	Stress         int32       `json:"stress"`
+	Fear           int32       `json:"fear"`
+	Infected       bool        `json:"infected"`
+	Firewall       bool        `json:"firewall"`
 	ObservedAt     time.Time   `json:"observed_at"`
 	Source         string      `json:"source"`
 }

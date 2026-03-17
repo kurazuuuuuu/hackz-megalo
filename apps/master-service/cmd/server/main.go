@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/kurazuuuuuu/hackz-megalo/libs/config"
@@ -65,6 +66,58 @@ type publishEventRequest struct {
 type masterServer struct {
 	redisClient *redislayer.Client
 	hub         *websocketHub
+	mu          sync.Mutex
+	sessionID   string
+}
+
+func (s *masterServer) tryReserveSessionSlot() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionID != "" {
+		return false
+	}
+	s.sessionID = "pending"
+	return true
+}
+
+func (s *masterServer) startSession(ctx context.Context) (domain.SessionMeta, error) {
+	meta := domain.SessionMeta{
+		SessionID: uuid.NewString(),
+		StartedAt: time.Now().UTC(),
+	}
+	if err := s.redisClient.CreateSession(ctx, meta); err != nil {
+		return domain.SessionMeta{}, fmt.Errorf("create session: %w", err)
+	}
+
+	s.mu.Lock()
+	s.sessionID = meta.SessionID
+	s.mu.Unlock()
+
+	return meta, nil
+}
+
+func (s *masterServer) endSession(ctx context.Context, sessionID string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	if err := s.redisClient.DeleteSession(ctx, sessionID); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+func (s *masterServer) releaseSessionSlot(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sessionID == "" || s.sessionID == sessionID || s.sessionID == "pending" {
+		s.sessionID = ""
+	}
+}
+
+func (s *masterServer) currentSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID
 }
 
 func main() {
@@ -91,7 +144,7 @@ func main() {
 		redisClient: redisClient,
 		hub:         newWebsocketHub(),
 	}
-	go subscribeStateUpdates(ctx, redisClient, serverState.hub)
+	go serverState.subscribeStateUpdates(ctx)
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
@@ -104,17 +157,39 @@ func main() {
 	})
 	mux.HandleFunc("/events", serverState.handlePublishEvent)
 	mux.HandleFunc("/internal/events", serverState.handlePublishEvent)
+	mux.HandleFunc("/internal/session", serverState.handleGetActiveSession)
+	mux.HandleFunc("/internal/session/metrics", serverState.handleGetActiveSessionMetrics)
 	mux.HandleFunc("/internal/slaves", serverState.handleListSlaveStates)
 	mux.HandleFunc("/internal/slaves/", serverState.handleGetSlaveState)
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		if !serverState.tryReserveSessionSlot() {
+			http.Error(w, "active session already exists", http.StatusConflict)
+			return
+		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			serverState.releaseSessionSlot("")
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
+		sessionMeta, err := serverState.startSession(r.Context())
+		if err != nil {
+			serverState.releaseSessionSlot("")
+			_ = conn.Close()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		serverState.hub.add(conn)
-		defer serverState.hub.remove(conn)
+		defer func() {
+			serverState.hub.remove(conn)
+			if err := serverState.endSession(context.Background(), sessionMeta.SessionID); err != nil {
+				log.Printf("end session %s: %v", sessionMeta.SessionID, err)
+			}
+			serverState.releaseSessionSlot(sessionMeta.SessionID)
+		}()
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -156,10 +231,17 @@ func (s *masterServer) handlePublishEvent(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
+	if err != nil {
+		http.Error(w, "active session not found", http.StatusConflict)
+		return
+	}
+
 	event := domain.Event{
 		EventID:   req.EventID,
 		Seed:      req.Seed,
 		TargetPod: req.TargetPod,
+		SessionID: sessionID,
 		Source:    "master-service",
 		CreatedAt: time.Now().UTC(),
 	}
@@ -173,13 +255,61 @@ func (s *masterServer) handlePublishEvent(w http.ResponseWriter, r *http.Request
 	_ = json.NewEncoder(w).Encode(event)
 }
 
+func (s *masterServer) handleGetActiveSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
+	if err != nil {
+		http.Error(w, "active session not found", http.StatusNotFound)
+		return
+	}
+
+	meta, err := s.redisClient.GetSessionMeta(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(meta)
+}
+
+func (s *masterServer) handleGetActiveSessionMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
+	if err != nil {
+		http.Error(w, "active session not found", http.StatusNotFound)
+		return
+	}
+
+	metrics, err := s.redisClient.GetSessionMetrics(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(metrics)
+}
+
 func (s *masterServer) handleListSlaveStates(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	states, err := s.redisClient.ListSlaveStates(r.Context())
+	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
+	if err != nil {
+		_ = json.NewEncoder(w).Encode([]domain.SlaveState{})
+		return
+	}
+
+	states, err := s.redisClient.ListSlaveStates(r.Context(), sessionID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -200,7 +330,13 @@ func (s *masterServer) handleGetSlaveState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	state, err := s.redisClient.GetSlaveState(r.Context(), slaveID)
+	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
+	if err != nil {
+		http.Error(w, "active session not found", http.StatusNotFound)
+		return
+	}
+
+	state, err := s.redisClient.GetSlaveState(r.Context(), sessionID, slaveID)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, fmt.Sprintf("slave state not found: %s", slaveID), http.StatusNotFound)
@@ -213,8 +349,8 @@ func (s *masterServer) handleGetSlaveState(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(state)
 }
 
-func subscribeStateUpdates(ctx context.Context, redisClient *redislayer.Client, hub *websocketHub) {
-	pubsub := redisClient.SubscribeStates(ctx)
+func (s *masterServer) subscribeStateUpdates(ctx context.Context) {
+	pubsub := s.redisClient.SubscribeStates(ctx)
 	defer func() {
 		if err := pubsub.Close(); err != nil {
 			log.Printf("close redis pubsub: %v", err)
@@ -236,9 +372,12 @@ func subscribeStateUpdates(ctx context.Context, redisClient *redislayer.Client, 
 				log.Printf("decode slave state: %v", err)
 				continue
 			}
+			if currentSessionID := s.currentSessionID(); currentSessionID == "" || state.SessionID != currentSessionID {
+				continue
+			}
 
 			log.Printf("received slave state update: slave_id=%s pod=%s status=%s remaining_turns=%d", state.SlaveID, state.K8sPodName, state.Status, state.RemainingTurns)
-			hub.broadcast(state)
+			s.hub.broadcast(state)
 		}
 	}
 }

@@ -26,6 +26,7 @@ type SlaveConfig struct {
 	GRPCAddr              string
 	ControllerGRPCTarget  string
 	PodID                 string
+	PodCount              int32
 	K8sPodName            string
 	K8sPodUID             string
 	PodIP                 string
@@ -64,10 +65,25 @@ func LoadController() (ControllerConfig, error) {
 }
 
 func LoadSlave() (SlaveConfig, error) {
+	podID := envOrDefault("SLAVE_POD_ID", "")
+	if podID == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return SlaveConfig{}, fmt.Errorf("get hostname for SLAVE_POD_ID fallback: %w", err)
+		}
+		podID = hostname
+	}
+
+	podCount := envOrDefaultInt32("SLAVE_POD_COUNT", 20)
+	if podCount <= 0 {
+		podCount = 1
+	}
+
 	cfg := SlaveConfig{
 		GRPCAddr:              envOrDefault("SLAVE_GRPC_ADDR", ":50051"),
 		ControllerGRPCTarget:  envOrDefault("SLAVE_CONTROLLER_GRPC_TARGET", "localhost:50052"),
-		PodID:                 envOrDefault("SLAVE_POD_ID", "slave-1"),
+		PodID:                 podID,
+		PodCount:              podCount,
 		K8sPodName:            envOrDefault("SLAVE_K8S_POD_NAME", "slave-service-0"),
 		K8sPodUID:             envOrDefault("SLAVE_K8S_POD_UID", "slave-service-0-uid"),
 		PodIP:                 envOrDefault("SLAVE_POD_IP", "127.0.0.1"),

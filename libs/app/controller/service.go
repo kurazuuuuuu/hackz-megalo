@@ -22,8 +22,14 @@ func (s *RegistrationService) RegisterSlave(ctx context.Context, req *slavev1.Re
 		return nil, fmt.Errorf("redis client is required")
 	}
 
+	sessionID, err := s.Redis.GetActiveSessionID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get active session: %w", err)
+	}
+
 	now := time.Now().UTC()
 	state := domain.SlaveState{
+		SessionID:      sessionID,
 		SlaveID:        uuid.NewString(),
 		K8sPodName:     req.GetK8SPodName(),
 		K8sPodUID:      req.GetK8SPodUid(),
@@ -38,6 +44,12 @@ func (s *RegistrationService) RegisterSlave(ctx context.Context, req *slavev1.Re
 
 	if err := s.Redis.PublishSlaveState(ctx, state); err != nil {
 		return nil, fmt.Errorf("publish slave state: %w", err)
+	}
+	if _, err := s.Redis.UpdateSessionMetrics(ctx, sessionID, func(metrics domain.SessionMetrics) domain.SessionMetrics {
+		metrics.LiveSlaves++
+		return metrics
+	}); err != nil {
+		return nil, fmt.Errorf("increment session live count: %w", err)
 	}
 
 	return &slavev1.RegisterSlaveResponse{

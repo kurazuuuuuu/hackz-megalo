@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	controllerapp "github.com/kurazuuuuuu/hackz-megalo/libs/app/controller"
 	"github.com/kurazuuuuuu/hackz-megalo/libs/config"
+	"github.com/kurazuuuuuu/hackz-megalo/libs/domain"
 	redislayer "github.com/kurazuuuuuu/hackz-megalo/libs/infra/redis"
 	grpcserver "github.com/kurazuuuuuu/hackz-megalo/libs/server/grpc"
 	slavev1 "github.com/kurazuuuuuu/hackz-megalo/libs/transport/grpc/gen/slavev1"
@@ -108,13 +110,48 @@ func main() {
 			}
 
 			state := redislayer.FromProtoSlaveState(resp.GetSlaveState(), "controller-service")
+			state.SessionID = event.SessionID
+
+			previousState, err := redisClient.GetSlaveState(ctx, event.SessionID, state.SlaveID)
+			if err != nil && !errors.Is(err, context.Canceled) && !isNotFoundError(err) {
+				log.Printf("get previous slave state: %v", err)
+				continue
+			}
 
 			if err := redisClient.PublishSlaveState(ctx, state); err != nil {
 				log.Printf("publish slave state: %v", err)
 				continue
 			}
 
+			if err := applySessionMetricsForStateChange(ctx, redisClient, event.SessionID, previousState, state); err != nil {
+				log.Printf("update session metrics: %v", err)
+				continue
+			}
+
 			log.Printf("event %d processed by slave_id=%s status=%s accepted=%v", event.EventID, state.SlaveID, state.Status, resp.GetAccepted())
 		}
 	}
+}
+
+func isTerminalState(status domain.SlaveStatus) bool {
+	return status == domain.SlaveStatusTerminating || status == domain.SlaveStatusGone
+}
+
+func applySessionMetricsForStateChange(ctx context.Context, redisClient *redislayer.Client, sessionID string, previousState, currentState domain.SlaveState) error {
+	if isTerminalState(previousState.Status) || !isTerminalState(currentState.Status) {
+		return nil
+	}
+
+	_, err := redisClient.UpdateSessionMetrics(ctx, sessionID, func(metrics domain.SessionMetrics) domain.SessionMetrics {
+		if metrics.LiveSlaves > 0 {
+			metrics.LiveSlaves--
+		}
+		metrics.GoneSlaves++
+		return metrics
+	})
+	return err
+}
+
+func isNotFoundError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not found")
 }
