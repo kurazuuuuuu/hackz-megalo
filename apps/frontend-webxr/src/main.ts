@@ -3,12 +3,12 @@ import "./style.css";
 import {
   connectSessionSocket,
   fetchSessionMetrics,
-  sendPodAction,
+  sendPodStateUpdate,
   waitForSessionSnapshot,
 } from "./api.ts";
 import { PodScene } from "./scene.ts";
 import { GameStore, getEffectiveCounts, getPods } from "./store.ts";
-import type { PodAction, SlaveState } from "./types.ts";
+import type { DeathReason, SlaveState } from "./types.ts";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -22,12 +22,12 @@ app.innerHTML = `
       <p class="eyebrow">Hackz Megalo</p>
       <h1>Pod たちの箱庭</h1>
       <p class="lead">
-        先生は観察者であり、ちょっとだけ加害者です。セッションを開始すると、Pod の群れが現れて、
-        叩く・驚かす・感染させる・防御を切り替える操作ができます。WebXR モードでは、Pod たちが目の前の机の上で歩き回ります。
+        先生は観察者です。セッションを開始すると Pod の群れが現れ、フロントエンドは
+        「押しつぶす」「落下する」の 2 種だけを絶対状態として backend に通知します。
       </p>
       <div class="start-meta">
-        <span>ダブルクリックで叩く</span>
-        <span>選択して右パネルから細かく操作</span>
+        <span>ダブルクリックで押しつぶす</span>
+        <span>机から落下すると Gone を通知</span>
         <span data-xr-badge>WebXR: checking</span>
       </div>
       <div class="start-actions">
@@ -60,9 +60,9 @@ app.innerHTML = `
           <div class="field-header">
             <div>
               <p class="eyebrow">Pod Field</p>
-              <h3>群れを観察して、狙いを定めてください</h3>
+              <h3>群れを観察して、必要なら押しつぶしてください</h3>
             </div>
-            <div class="field-help">Single click: select / Double click: hit / WebXR: hand tracking only</div>
+            <div class="field-help">Single click: select / Double click: crush / WebXR: hand tracking only</div>
           </div>
           <div class="scene-root" data-scene-root></div>
           <div class="pod-strip" data-pod-strip></div>
@@ -72,13 +72,7 @@ app.innerHTML = `
           <section class="panel-card">
             <p class="eyebrow">Selected Pod</p>
             <div data-selected-panel class="empty-panel">Pod を選ぶと詳細が見えます。</div>
-            <div class="action-grid">
-              <button type="button" data-action="hit">叩く</button>
-              <button type="button" data-action="scare">驚かす</button>
-              <button type="button" data-action="infect">感染</button>
-              <button type="button" data-action="firewall">防御切替</button>
-              <button type="button" data-action="calm">落ち着かせる</button>
-            </div>
+            <p class="selected-note">XR では手をパーにして POD に触れると Gone を通知します。</p>
           </section>
 
           <section class="panel-card">
@@ -110,7 +104,6 @@ const activityList = requiredElement<HTMLUListElement>("[data-activity-list]");
 const sceneRoot = requiredElement<HTMLElement>("[data-scene-root]");
 const disconnectButton = requiredElement<HTMLButtonElement>("[data-disconnect]");
 const enterXRButton = requiredElement<HTMLButtonElement>("[data-enter-xr]");
-const actionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-action]"));
 
 const scene = new PodScene(sceneRoot, {
   onSelect: (slaveId) => {
@@ -120,20 +113,13 @@ const scene = new PodScene(sceneRoot, {
     store.setHoveredPod(slaveId);
   },
   onHit: (slaveId) => {
-    void triggerAction("hit", slaveId);
+    void reportPodGone("DEATH_REASON_USER_ACTION", slaveId, "押しつぶしました。");
   },
   onDisconnect: () => {
     void disconnectSession("WebXR セッションを終了しました。");
   },
   onPodFall: (slaveId) => {
-    const pod = store.getState().podsById[slaveId];
-    store.markXrPodEliminated(slaveId);
-    if (pod) {
-      store.log({
-        kind: "state",
-        message: `${pod.k8s_pod_name} が机から落下しました。XR 上では倒れた扱いです。`,
-      });
-    }
+    void reportPodGone("DEATH_REASON_POD_DOWN", slaveId, "机から落下しました。");
   },
   onXRStateChange: (active) => {
     store.setXRActive(active);
@@ -157,16 +143,6 @@ enterXRButton.addEventListener("click", () => {
 
 disconnectButton.addEventListener("click", () => {
   void disconnectSession("セッションを切断しました。");
-});
-
-actionButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    const action = button.dataset.action as PodAction | undefined;
-    if (!action) {
-      return;
-    }
-    void triggerAction(action);
-  });
 });
 
 window.addEventListener("beforeunload", () => {
@@ -200,20 +176,16 @@ store.subscribe((state) => {
   enterXRButton.hidden = !state.xrSupported || state.xrActive || state.phase !== "playing";
   disconnectButton.textContent = state.xrActive ? "Disconnect + Exit XR" : "Disconnect";
 
-  renderSelectedPanel(selected, state.xrEliminatedPodIds.includes(selected?.slave_id ?? ""));
-  renderPodStrip(pods, state.selectedPodId, state.hoveredPodId, state.xrEliminatedPodIds);
+  renderSelectedPanel(selected);
+  renderPodStrip(pods, state.selectedPodId, state.hoveredPodId);
   renderActivity(state.activity);
-  scene.update(pods, state.selectedPodId, state.hoveredPodId, new Set(state.xrEliminatedPodIds));
+  scene.update(pods, state.selectedPodId, state.hoveredPodId, new Set());
   scene.setHudData({
     sessionId: state.session?.session_id ?? "not connected",
     live: counts.live,
     gone: counts.gone,
     connection: state.connectionMessage,
     xrActive: state.xrActive,
-  });
-
-  actionButtons.forEach((button) => {
-    button.disabled = !selected || state.actionInFlight || state.phase !== "playing";
   });
 });
 
@@ -401,36 +373,54 @@ function scheduleMetricsRefresh(): void {
   }, 250);
 }
 
-async function triggerAction(action: PodAction, explicitSlaveId?: string): Promise<void> {
+async function reportPodGone(
+  deathReason: DeathReason,
+  explicitSlaveId?: string,
+  messageSuffix = "Gone を通知しました。",
+): Promise<void> {
   const state = store.getState();
   const targetId = explicitSlaveId ?? state.selectedPodId;
-  if (!targetId) {
+  if (!targetId || !state.session || !socket) {
     return;
   }
 
   const pod = state.podsById[targetId];
-  if (!pod) {
+  if (!pod || pod.status === "SLAVE_STATUS_GONE") {
     return;
   }
 
+  const observedAt = new Date().toISOString();
   store.setActionInFlight(true);
+  store.upsertPod({
+    ...pod,
+    status: "SLAVE_STATUS_GONE",
+    death_reason: deathReason,
+    observed_at: observedAt,
+    source: "frontend-webxr",
+  });
 
   try {
-    await sendPodAction(action, pod.slave_id);
+    sendPodStateUpdate(socket, {
+      session_id: state.session.session_id,
+      slave_id: pod.slave_id,
+      status: "SLAVE_STATUS_GONE",
+      death_reason: deathReason,
+    });
     store.log({
       kind: "action",
-      message: `${pod.k8s_pod_name} に ${humanizeAction(action)} を実行しました。`,
+      message: `${pod.k8s_pod_name} を ${messageSuffix}`,
     });
+    scheduleMetricsRefresh();
   } catch (error) {
     store.patch({
-      errorMessage: error instanceof Error ? error.message : "イベント送信に失敗しました。",
+      errorMessage: error instanceof Error ? error.message : "状態更新の送信に失敗しました。",
     });
   } finally {
     store.setActionInFlight(false);
   }
 }
 
-function renderSelectedPanel(pod: SlaveState | null, isLocallyFallen: boolean): void {
+function renderSelectedPanel(pod: SlaveState | null): void {
   if (!pod) {
     selectedPanel.className = "empty-panel";
     selectedPanel.innerHTML = "Pod を選ぶと詳細が見えます。";
@@ -447,19 +437,13 @@ function renderSelectedPanel(pod: SlaveState | null, isLocallyFallen: boolean): 
       <div><dt>Fear</dt><dd>${pod.fear}</dd></div>
       <div><dt>Turns</dt><dd>${pod.turns_lived}</dd></div>
       <div><dt>Remaining</dt><dd>${pod.remaining_turns}</dd></div>
-      <div><dt>Flags</dt><dd>${
-        [pod.infected ? "infected" : null, pod.firewall ? "firewall" : null]
-          .filter(Boolean)
-          .join(" / ") || "none"
-      }</dd></div>
+      <div><dt>Reason</dt><dd>${humanizeDeathReason(pod.death_reason)}</dd></div>
     </dl>
     <p class="selected-note">
       ${
-        isLocallyFallen
-          ? "この Pod は XR の机から落下しました。"
-          : pod.status === "SLAVE_STATUS_GONE"
-            ? "この Pod はもう倒れています。"
-            : "ダブルクリックですぐ叩けます。"
+        pod.status === "SLAVE_STATUS_GONE"
+          ? "この Pod は Gone 状態として同期済みです。"
+          : "XR では手をパーにして触れると Gone を通知できます。"
       }
     </p>
   `;
@@ -469,9 +453,7 @@ function renderPodStrip(
   pods: SlaveState[],
   selectedPodId: string | null,
   hoveredPodId: string | null,
-  xrEliminatedPodIds: string[],
 ): void {
-  const eliminated = new Set(xrEliminatedPodIds);
   podStrip.innerHTML = "";
 
   for (const pod of pods) {
@@ -484,12 +466,9 @@ function renderPodStrip(
     if (pod.slave_id === hoveredPodId) {
       button.classList.add("is-hovered");
     }
-    if (eliminated.has(pod.slave_id)) {
-      button.classList.add("is-fallen");
-    }
     button.innerHTML = `
       <span>${escapeHTML(pod.k8s_pod_name)}</span>
-      <small>${eliminated.has(pod.slave_id) ? "fallen in XR" : humanizeStatus(pod.status)}</small>
+      <small>${humanizeStatus(pod.status)}</small>
     `;
     button.addEventListener("click", () => {
       store.setSelectedPod(pod.slave_id);
@@ -539,18 +518,20 @@ function humanizeStatus(status: SlaveState["status"]): string {
   }
 }
 
-function humanizeAction(action: PodAction): string {
-  switch (action) {
-    case "hit":
-      return "叩く";
-    case "scare":
-      return "驚かす";
-    case "infect":
-      return "感染";
-    case "firewall":
-      return "防御切替";
-    case "calm":
-      return "落ち着かせる";
+function humanizeDeathReason(reason: SlaveState["death_reason"]): string {
+  switch (reason) {
+    case "DEATH_REASON_POD_DOWN":
+      return "fell";
+    case "DEATH_REASON_USER_ACTION":
+      return "crushed";
+    case "DEATH_REASON_DISEASE":
+      return "disease";
+    case "DEATH_REASON_LIFESPAN":
+      return "lifespan";
+    case "DEATH_REASON_PROCESS_DOWN":
+      return "process down";
+    default:
+      return "unspecified";
   }
 }
 

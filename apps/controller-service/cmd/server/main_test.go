@@ -92,3 +92,27 @@ func TestIsGoneTransition(t *testing.T) {
 		t.Fatalf("isGoneTransition() = true, want false for repeated gone state")
 	}
 }
+
+func TestObservedStateStoreRememberReturnsPreviousState(t *testing.T) {
+	store := newObservedStateStore()
+	first := domain.SlaveState{
+		SessionID: "session-1",
+		SlaveID:   "slave-1",
+		Status:    domain.SlaveStatusLive,
+	}
+	second := domain.SlaveState{
+		SessionID: "session-1",
+		SlaveID:   "slave-1",
+		Status:    domain.SlaveStatusGone,
+	}
+
+	previous := store.remember(first)
+	if previous.Status != domain.SlaveStatusUnspecified {
+		t.Fatalf("previous.Status = %q, want unspecified", previous.Status)
+	}
+
+	previous = store.remember(second)
+	if previous.Status != domain.SlaveStatusLive {
+		t.Fatalf("previous.Status = %q, want %q", previous.Status, domain.SlaveStatusLive)
+	}
+}

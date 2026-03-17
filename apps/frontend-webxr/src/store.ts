@@ -199,18 +199,10 @@ export function getPods(state: GameState): SlaveState[] {
 
 export function getEffectiveCounts(state: GameState): { live: number; gone: number } {
   const pods = getPods(state);
-  const baseLive =
-    state.metrics?.live_slaves ?? pods.filter((pod) => pod.status !== "SLAVE_STATUS_GONE").length;
-  const baseGone =
-    state.metrics?.gone_slaves ?? pods.filter((pod) => pod.status === "SLAVE_STATUS_GONE").length;
-
-  const locallyFallenLivePods = state.xrEliminatedPodIds.filter((slaveId) => {
-    const pod = state.podsById[slaveId];
-    return pod && pod.status !== "SLAVE_STATUS_GONE";
-  }).length;
-
   return {
-    live: Math.max(0, baseLive - locallyFallenLivePods),
-    gone: baseGone + locallyFallenLivePods,
+    live:
+      state.metrics?.live_slaves ?? pods.filter((pod) => pod.status !== "SLAVE_STATUS_GONE").length,
+    gone:
+      state.metrics?.gone_slaves ?? pods.filter((pod) => pod.status === "SLAVE_STATUS_GONE").length,
   };
 }

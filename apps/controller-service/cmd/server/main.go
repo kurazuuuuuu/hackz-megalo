@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,6 +62,9 @@ func main() {
 
 	log.Printf("controller-service listening on %s and dispatching to pod gRPC port %s", cfg.GRPCAddr, cfg.SlaveGRPCPort)
 
+	observedStates := newObservedStateStore()
+	go subscribeStateUpdates(ctx, redisClient, cfg.SlaveGRPCPort, observedStates)
+
 	for {
 		select {
 		case err := <-errCh:
@@ -105,13 +109,31 @@ func main() {
 				log.Printf("update session metrics: %v", err)
 				continue
 			}
-			if err := notifyGoneSlave(ctx, cfg.SlaveGRPCPort, previousState, state); err != nil {
-				log.Printf("notify gone slave %s: %v", state.SlaveID, err)
-			}
 
 			log.Printf("event %d processed by slave_id=%s status=%s accepted=%v", event.EventID, state.SlaveID, state.Status, resp.GetAccepted())
 		}
 	}
+}
+
+type observedStateStore struct {
+	mu     sync.Mutex
+	states map[string]domain.SlaveState
+}
+
+func newObservedStateStore() *observedStateStore {
+	return &observedStateStore{
+		states: make(map[string]domain.SlaveState),
+	}
+}
+
+func (s *observedStateStore) remember(state domain.SlaveState) domain.SlaveState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := state.SessionID + ":" + state.SlaveID
+	previous := s.states[key]
+	s.states[key] = state
+	return previous
 }
 
 func resolveTargetSlaveState(ctx context.Context, redisClient *redislayer.Client, sessionID, target string) (domain.SlaveState, error) {
@@ -216,4 +238,36 @@ func notifyGoneSlave(ctx context.Context, slaveGRPCPort string, previousState, c
 
 	log.Printf("shutdown dispatched to slave_id=%s pod=%s", currentState.SlaveID, currentState.K8sPodName)
 	return nil
+}
+
+func subscribeStateUpdates(ctx context.Context, redisClient *redislayer.Client, slaveGRPCPort string, observedStates *observedStateStore) {
+	pubsub := redisClient.SubscribeStates(ctx)
+	defer func() {
+		if err := pubsub.Close(); err != nil {
+			log.Printf("close redis pubsub: %v", err)
+		}
+	}()
+
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+
+			state, err := redislayer.DecodeSlaveState(msg.Payload)
+			if err != nil {
+				log.Printf("decode slave state: %v", err)
+				continue
+			}
+
+			previousState := observedStates.remember(state)
+			if err := notifyGoneSlave(ctx, slaveGRPCPort, previousState, state); err != nil {
+				log.Printf("notify gone slave %s: %v", state.SlaveID, err)
+			}
+		}
+	}
 }

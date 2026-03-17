@@ -91,6 +91,14 @@ type publishEventRequest struct {
 	TargetPod string `json:"target_pod"`
 }
 
+type websocketClientMessage struct {
+	Type        string             `json:"type"`
+	SessionID   string             `json:"session_id"`
+	SlaveID     string             `json:"slave_id"`
+	Status      domain.SlaveStatus `json:"status"`
+	DeathReason domain.DeathReason `json:"death_reason"`
+}
+
 type masterServer struct {
 	redisClient *redislayer.Client
 	hub         *websocketHub
@@ -128,9 +136,42 @@ func (s *masterServer) endSession(ctx context.Context, sessionID string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
+
+	if err := s.markAllSlavesGone(ctx, sessionID); err != nil {
+		return err
+	}
 	if err := s.redisClient.DeleteSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("delete session: %w", err)
 	}
+	return nil
+}
+
+func (s *masterServer) markAllSlavesGone(ctx context.Context, sessionID string) error {
+	states, err := s.redisClient.ListSlaveStates(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("list slave states before session end: %w", err)
+	}
+
+	now := time.Now().UTC()
+	for _, state := range states {
+		state.Status = domain.SlaveStatusGone
+		state.DeathReason = domain.DeathReasonProcessDown
+		state.ObservedAt = now
+		state.Source = "master-service"
+		if err := s.redisClient.PublishSlaveState(ctx, state); err != nil {
+			return fmt.Errorf("publish gone slave state %s: %w", state.SlaveID, err)
+		}
+	}
+
+	_, err = s.redisClient.UpdateSessionMetrics(ctx, sessionID, func(metrics domain.SessionMetrics) domain.SessionMetrics {
+		metrics.LiveSlaves = 0
+		metrics.GoneSlaves = int32(len(states))
+		return metrics
+	})
+	if err != nil {
+		return fmt.Errorf("update final session metrics: %w", err)
+	}
+
 	return nil
 }
 
@@ -245,8 +286,12 @@ func main() {
 		defer close(pingDone)
 
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
 				return
+			}
+			if err := serverState.handleClientMessage(r.Context(), sessionMeta.SessionID, payload); err != nil {
+				log.Printf("handle websocket client message: %v", err)
 			}
 		}
 	})
@@ -270,6 +315,73 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("listen and serve: %v", err)
 	}
+}
+
+func (s *masterServer) handleClientMessage(ctx context.Context, sessionID string, payload []byte) error {
+	var message websocketClientMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
+		return fmt.Errorf("decode websocket client message: %w", err)
+	}
+
+	switch message.Type {
+	case "pod_state_update":
+		return s.handlePodStateUpdate(ctx, sessionID, message)
+	default:
+		return fmt.Errorf("unsupported websocket message type: %s", message.Type)
+	}
+}
+
+func (s *masterServer) handlePodStateUpdate(ctx context.Context, sessionID string, message websocketClientMessage) error {
+	if message.SessionID != "" && message.SessionID != sessionID {
+		return fmt.Errorf("session mismatch")
+	}
+	if message.SlaveID == "" {
+		return fmt.Errorf("slave_id is required")
+	}
+	if message.Status != domain.SlaveStatusGone {
+		return fmt.Errorf("unsupported status: %s", message.Status)
+	}
+	if message.DeathReason != domain.DeathReasonPodDown && message.DeathReason != domain.DeathReasonUserAction {
+		return fmt.Errorf("unsupported death_reason: %s", message.DeathReason)
+	}
+
+	previousState, err := s.redisClient.GetSlaveState(ctx, sessionID, message.SlaveID)
+	if err != nil {
+		return err
+	}
+
+	nextState := previousState
+	nextState.Status = domain.SlaveStatusGone
+	nextState.DeathReason = message.DeathReason
+	nextState.ObservedAt = time.Now().UTC()
+	nextState.Source = "frontend-webxr"
+
+	if err := s.redisClient.PublishSlaveState(ctx, nextState); err != nil {
+		return fmt.Errorf("publish slave state: %w", err)
+	}
+	if err := applySessionMetricsForStateChange(ctx, s.redisClient, sessionID, previousState, nextState); err != nil {
+		return fmt.Errorf("update session metrics: %w", err)
+	}
+	return nil
+}
+
+func isTerminalState(status domain.SlaveStatus) bool {
+	return status == domain.SlaveStatusTerminating || status == domain.SlaveStatusGone
+}
+
+func applySessionMetricsForStateChange(ctx context.Context, redisClient *redislayer.Client, sessionID string, previousState, currentState domain.SlaveState) error {
+	if isTerminalState(previousState.Status) || !isTerminalState(currentState.Status) {
+		return nil
+	}
+
+	_, err := redisClient.UpdateSessionMetrics(ctx, sessionID, func(metrics domain.SessionMetrics) domain.SessionMetrics {
+		if metrics.LiveSlaves > 0 {
+			metrics.LiveSlaves--
+		}
+		metrics.GoneSlaves++
+		return metrics
+	})
+	return err
 }
 
 func (s *masterServer) handlePublishEvent(w http.ResponseWriter, r *http.Request) {

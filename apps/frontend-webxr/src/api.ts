@@ -1,12 +1,4 @@
-import type { PodAction, SessionMeta, SessionMetrics, SlaveState } from "./types.ts";
-
-const EVENT_ID_BY_ACTION: Record<PodAction, number> = {
-  hit: 1,
-  scare: 2,
-  infect: 3,
-  firewall: 4,
-  calm: 5,
-};
+import type { DeathReason, SessionMeta, SessionMetrics, SlaveState } from "./types.ts";
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
@@ -49,15 +41,25 @@ export async function fetchSlaveStates(): Promise<SlaveState[]> {
   return requestJSON<SlaveState[]>("/internal/slaves");
 }
 
-export async function sendPodAction(action: PodAction, targetPod: string): Promise<void> {
-  await requestJSON("/events", {
-    method: "POST",
-    body: JSON.stringify({
-      event_id: EVENT_ID_BY_ACTION[action],
-      seed: Date.now(),
-      target_pod: targetPod,
+export function sendPodStateUpdate(
+  socket: WebSocket,
+  payload: {
+    session_id: string;
+    slave_id: string;
+    status: "SLAVE_STATUS_GONE";
+    death_reason: DeathReason;
+  },
+): void {
+  if (socket.readyState !== WebSocket.OPEN) {
+    throw new Error("WebSocket が開いていません。");
+  }
+
+  socket.send(
+    JSON.stringify({
+      type: "pod_state_update",
+      ...payload,
     }),
-  });
+  );
 }
 
 export function connectSessionSocket(handlers: {

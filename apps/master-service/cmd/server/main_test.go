@@ -153,6 +153,132 @@ func TestHandleGetActiveSessionMetrics(t *testing.T) {
 	}
 }
 
+func TestHandleClientMessageUpdatesSlaveStateToGone(t *testing.T) {
+	server := newTestMasterServer(t)
+	createActiveSession(t, server, "session-1")
+
+	err := server.redisClient.PublishSlaveState(context.Background(), domain.SlaveState{
+		SessionID:      "session-1",
+		SlaveID:        "slave-1",
+		K8sPodName:     "slave-service-0",
+		K8sPodUID:      "uid-1",
+		PodIP:          "10.0.0.10",
+		Status:         domain.SlaveStatusLive,
+		DeathReason:    domain.DeathReasonUnspecified,
+		TurnsLived:     1,
+		RemainingTurns: 9,
+		ObservedAt:     time.Now().UTC(),
+		Source:         "controller-service",
+	})
+	if err != nil {
+		t.Fatalf("PublishSlaveState() error = %v", err)
+	}
+	if _, err := server.redisClient.UpdateSessionMetrics(context.Background(), "session-1", func(metrics domain.SessionMetrics) domain.SessionMetrics {
+		metrics.LiveSlaves = 1
+		return metrics
+	}); err != nil {
+		t.Fatalf("UpdateSessionMetrics() error = %v", err)
+	}
+
+	payload := []byte(`{"type":"pod_state_update","session_id":"session-1","slave_id":"slave-1","status":"SLAVE_STATUS_GONE","death_reason":"DEATH_REASON_POD_DOWN"}`)
+	if err := server.handleClientMessage(context.Background(), "session-1", payload); err != nil {
+		t.Fatalf("handleClientMessage() error = %v", err)
+	}
+
+	state, err := server.redisClient.GetSlaveState(context.Background(), "session-1", "slave-1")
+	if err != nil {
+		t.Fatalf("GetSlaveState() error = %v", err)
+	}
+	if state.Status != domain.SlaveStatusGone {
+		t.Fatalf("Status = %q, want %q", state.Status, domain.SlaveStatusGone)
+	}
+	if state.Source != "frontend-webxr" {
+		t.Fatalf("Source = %q, want %q", state.Source, "frontend-webxr")
+	}
+
+	metrics, err := server.redisClient.GetSessionMetrics(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("GetSessionMetrics() error = %v", err)
+	}
+	if metrics.LiveSlaves != 0 {
+		t.Fatalf("LiveSlaves = %d, want 0", metrics.LiveSlaves)
+	}
+	if metrics.GoneSlaves != 1 {
+		t.Fatalf("GoneSlaves = %d, want 1", metrics.GoneSlaves)
+	}
+}
+
+func TestHandleClientMessageRejectsUnsupportedStatus(t *testing.T) {
+	server := newTestMasterServer(t)
+	createActiveSession(t, server, "session-1")
+
+	payload := []byte(`{"type":"pod_state_update","session_id":"session-1","slave_id":"slave-1","status":"SLAVE_STATUS_LIVE","death_reason":"DEATH_REASON_POD_DOWN"}`)
+	if err := server.handleClientMessage(context.Background(), "session-1", payload); err == nil {
+		t.Fatal("handleClientMessage() error = nil, want unsupported status")
+	}
+}
+
+func TestMarkAllSlavesGone(t *testing.T) {
+	server := newTestMasterServer(t)
+	createActiveSession(t, server, "session-1")
+
+	for i := 0; i < 2; i++ {
+		err := server.redisClient.PublishSlaveState(context.Background(), domain.SlaveState{
+			SessionID:      "session-1",
+			SlaveID:        "slave-" + string(rune('1'+i)),
+			K8sPodName:     "slave-service-" + string(rune('0'+i)),
+			K8sPodUID:      "uid-" + string(rune('1'+i)),
+			PodIP:          "10.0.0.1" + string(rune('0'+i)),
+			Status:         domain.SlaveStatusLive,
+			DeathReason:    domain.DeathReasonUnspecified,
+			TurnsLived:     1,
+			RemainingTurns: 9,
+			ObservedAt:     time.Now().UTC(),
+			Source:         "controller-service",
+		})
+		if err != nil {
+			t.Fatalf("PublishSlaveState() error = %v", err)
+		}
+	}
+	if _, err := server.redisClient.UpdateSessionMetrics(context.Background(), "session-1", func(metrics domain.SessionMetrics) domain.SessionMetrics {
+		metrics.LiveSlaves = 2
+		return metrics
+	}); err != nil {
+		t.Fatalf("UpdateSessionMetrics() error = %v", err)
+	}
+
+	if err := server.markAllSlavesGone(context.Background(), "session-1"); err != nil {
+		t.Fatalf("markAllSlavesGone() error = %v", err)
+	}
+
+	states, err := server.redisClient.ListSlaveStates(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("ListSlaveStates() error = %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("len(states) = %d, want 2", len(states))
+	}
+	for _, state := range states {
+		if state.Status != domain.SlaveStatusGone {
+			t.Fatalf("Status = %q, want %q", state.Status, domain.SlaveStatusGone)
+		}
+		if state.DeathReason != domain.DeathReasonProcessDown {
+			t.Fatalf("DeathReason = %q, want %q", state.DeathReason, domain.DeathReasonProcessDown)
+		}
+	}
+
+	metrics, err := server.redisClient.GetSessionMetrics(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("GetSessionMetrics() error = %v", err)
+	}
+	if metrics.LiveSlaves != 0 {
+		t.Fatalf("LiveSlaves = %d, want 0", metrics.LiveSlaves)
+	}
+	if metrics.GoneSlaves != 2 {
+		t.Fatalf("GoneSlaves = %d, want 2", metrics.GoneSlaves)
+	}
+}
+
 func TestWebSocketSessionLifecycleAndSingleClient(t *testing.T) {
 	server := newTestMasterServer(t)
 
