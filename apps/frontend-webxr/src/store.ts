@@ -93,8 +93,15 @@ export class GameStore {
   }
 
   upsertPod(pod: SlaveState): void {
+    const previous = this.state.podsById[pod.slave_id];
     const selectedPodId =
       this.state.selectedPodId === null ? pod.slave_id : this.state.selectedPodId;
+    const xrEliminatedPodIds =
+      pod.status !== "SLAVE_STATUS_GONE" &&
+      this.state.xrEliminatedPodIds.includes(pod.slave_id) &&
+      shouldRestoreEliminatedPod(previous, pod)
+        ? this.state.xrEliminatedPodIds.filter((slaveId) => slaveId !== pod.slave_id)
+        : this.state.xrEliminatedPodIds;
 
     this.state = {
       ...this.state,
@@ -103,6 +110,7 @@ export class GameStore {
         [pod.slave_id]: pod,
       },
       selectedPodId,
+      xrEliminatedPodIds,
     };
     this.emit();
   }
@@ -205,4 +213,19 @@ export function getEffectiveCounts(state: GameState): { live: number; gone: numb
     gone:
       state.metrics?.gone_slaves ?? pods.filter((pod) => pod.status === "SLAVE_STATUS_GONE").length,
   };
+}
+
+function shouldRestoreEliminatedPod(previous: SlaveState | undefined, next: SlaveState): boolean {
+  if (!previous) {
+    return true;
+  }
+
+  if (previous.k8s_pod_uid !== next.k8s_pod_uid) {
+    return true;
+  }
+
+  return (
+    previous.status === "SLAVE_STATUS_GONE" &&
+    next.observed_at.localeCompare(previous.observed_at) >= 0
+  );
 }
