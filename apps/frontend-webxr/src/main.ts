@@ -21,13 +21,13 @@ app.innerHTML = `
     <section class="start-screen" data-screen="start">
       <div class="start-frame">
         <div class="start-copy">
-          <p class="eyebrow">Hackz Megalo</p>
-          <h1>Pod Console</h1>
+          <p class="eyebrow">Go | Kubernetes</p>
+          <h2>コンテナをオーケストレーションする</h2>
         </div>
         <div class="start-panel">
           <div class="start-meta">
             <span class="pill accent" data-xr-badge>WebXR: checking</span>
-            <p class="status-line" data-start-status>待機中です。</p>
+            <p class="status-line" data-start-status>セッション開始待機中</p>
           </div>
           <div class="start-actions">
             <button class="start-button" type="button" data-start-session>Start Session</button>
@@ -47,7 +47,7 @@ app.innerHTML = `
           <strong data-session-id>not connected</strong>
         </div>
         <div class="status-pills">
-          <span class="pill" data-connection-pill>待機中</span>
+          <span class="pill" data-connection-pill>セッション開始待機中</span>
           <span class="pill" data-live-pill>Live 0</span>
           <span class="pill" data-gone-pill>Gone 0</span>
           <span class="pill" data-mode-pill>Desktop</span>
@@ -311,7 +311,7 @@ async function disconnectSession(message: string): Promise<void> {
     kind: "system",
     message,
   });
-  store.resetToDisconnected("待機中");
+  store.resetToDisconnected("セッション開始待機中");
   startButton.disabled = false;
 }
 

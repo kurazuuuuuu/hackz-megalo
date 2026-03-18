@@ -175,7 +175,7 @@ export class PodScene {
     sessionId: "not connected",
     live: 0,
     gone: 0,
-    connection: "待機中",
+    connection: "セッション開始待機中",
     xrActive: false,
   };
 
