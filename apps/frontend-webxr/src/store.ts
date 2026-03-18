@@ -28,7 +28,7 @@ function initialState(xrSupported = false): GameState {
     podsById: {},
     selectedPodId: null,
     hoveredPodId: null,
-    connectionMessage: "待機中",
+    connectionMessage: "セッション開始待機中",
     errorMessage: null,
     actionInFlight: false,
     activity: [],

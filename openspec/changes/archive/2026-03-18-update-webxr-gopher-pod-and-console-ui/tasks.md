@@ -1,0 +1,11 @@
+## 1. Implementation
+- [x] 1.1 Add OpenSpec delta for gopher-inspired Pod visuals and minimal desktop console UI
+- [x] 1.2 Rebuild the XR Pod mesh in-scene so it reads as a gopher-inspired character instead of a stretched sphere
+- [x] 1.3 Simplify the start screen and connected desktop layout to a monochrome console with cyan accents
+- [x] 1.4 Update pod list and selected pod panels to be denser and more operations-console-like
+- [x] 1.5 Refine the XR Pod proportions to be more vertically elongated and less teddy-bear-like
+- [x] 1.6 Keep XR Pods basically upright during normal simulation while preserving player-driven movement
+- [x] 1.7 Run `vp check` in `apps/frontend-webxr` and fix any issues
+- [x] 1.8 Run `docker compose build frontend-webxr` at repository root and confirm build success
+- [x] 1.9 Place the XR board at a fixed floor-relative table height using the `local-floor` reference space
+- [x] 1.10 Re-run frontend validation after the floor-relative board placement change

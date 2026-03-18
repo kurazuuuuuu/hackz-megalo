@@ -15,7 +15,7 @@ interface PodSceneCallbacks {
 
 interface PodMeshEntry {
   group: THREE.Group;
-  podMesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>;
+  bodyMaterial: THREE.MeshStandardMaterial;
   shield: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
   phase: number;
 }
@@ -88,16 +88,16 @@ const POD_IMPULSE_INTERVAL_JITTER_MS = 1800;
 
 function statusColor(pod: SlaveState): string {
   if (pod.status === "SLAVE_STATUS_GONE") {
-    return "#515c6a";
+    return "#aab5c0";
   }
   if (pod.status === "SLAVE_STATUS_TERMINATING") {
-    return "#768394";
+    return "#95a3af";
   }
   if (pod.infected) {
-    return "#6f8e99";
+    return "#7897a5";
   }
   if (pod.firewall) {
-    return "#82def4";
+    return "#35c5e8";
   }
   return "#00add8";
 }
@@ -108,6 +108,10 @@ export class PodScene {
   private static readonly BOARD_DEPTH = 0.3;
 
   private static readonly BOARD_TOP_Y = 0.025;
+
+  private static readonly BOARD_SURFACE_HEIGHT = 0.3;
+
+  private static readonly BOARD_FORWARD_DISTANCE = 0.45;
 
   private static readonly BOARD_COLLIDER_HALF_HEIGHT = 0.01;
 
@@ -171,7 +175,7 @@ export class PodScene {
     sessionId: "not connected",
     live: 0,
     gone: 0,
-    connection: "待機中",
+    connection: "セッション開始待機中",
     xrActive: false,
   };
 
@@ -195,24 +199,25 @@ export class PodScene {
     this.renderer.setSize(this.container.clientWidth || 1, this.container.clientHeight || 1, false);
     this.renderer.domElement.className = "pod-scene-canvas";
     this.renderer.xr.enabled = true;
+    this.renderer.xr.setReferenceSpaceType("local-floor");
     this.container.append(this.renderer.domElement);
 
-    this.scene.add(new THREE.HemisphereLight("#eef8ff", "#21262f", 1.9));
+    this.scene.add(new THREE.HemisphereLight("#f9fcff", "#d8e1e8", 2.1));
 
     const keyLight = new THREE.DirectionalLight("#ffffff", 1.8);
     keyLight.position.set(5, 9, 5);
     this.scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight("#73d6f1", 0.8);
+    const fillLight = new THREE.DirectionalLight("#73d6f1", 1);
     fillLight.position.set(-4, 4, -6);
     this.scene.add(fillLight);
 
     this.boardSurface = new THREE.Mesh(
       new THREE.BoxGeometry(PodScene.BOARD_WIDTH, 0.05, PodScene.BOARD_DEPTH),
       new THREE.MeshStandardMaterial({
-        color: "#424b57",
-        roughness: 0.88,
-        metalness: 0.04,
+        color: "#eef3f6",
+        roughness: 0.94,
+        metalness: 0.01,
       }),
     );
     this.boardSurface.position.y = 0;
@@ -221,7 +226,7 @@ export class PodScene {
     const edge = new THREE.Mesh(
       new THREE.BoxGeometry(PodScene.BOARD_WIDTH + 0.03, 0.02, PodScene.BOARD_DEPTH + 0.03),
       new THREE.MeshStandardMaterial({
-        color: "#282f37",
+        color: "#cfd9e2",
         roughness: 0.94,
         metalness: 0.02,
       }),
@@ -231,7 +236,7 @@ export class PodScene {
 
     const tableLegGeometry = new THREE.BoxGeometry(0.035, 0.42, 0.035);
     const legMaterial = new THREE.MeshStandardMaterial({
-      color: "#313844",
+      color: "#d7e0e8",
       roughness: 0.95,
     });
     for (const [x, z] of [
@@ -248,9 +253,9 @@ export class PodScene {
     this.boardShadow = new THREE.Mesh(
       new THREE.CircleGeometry(3.1, 48),
       new THREE.MeshBasicMaterial({
-        color: "#0b0f12",
+        color: "#53606b",
         transparent: true,
-        opacity: 0.18,
+        opacity: 0.12,
       }),
     );
     this.boardShadow.rotation.x = -Math.PI / 2;
@@ -358,15 +363,15 @@ export class PodScene {
 
       const color = statusColor(pod);
 
-      entry.podMesh.material.color.set(color);
-      entry.podMesh.material.emissive.set(
+      entry.bodyMaterial.color.set(color);
+      entry.bodyMaterial.emissive.set(
         pod.status === "SLAVE_STATUS_TERMINATING"
-          ? "#29374a"
+          ? "#485866"
           : pod.infected
-            ? "#213745"
-            : "#104e63",
+            ? "#415562"
+            : "#0b5d78",
       );
-      entry.podMesh.material.emissiveIntensity = 0.28;
+      entry.bodyMaterial.emissiveIntensity = 0.18;
 
       entry.shield.visible = pod.firewall;
       entry.shield.material.opacity = pod.firewall ? 0.88 : 0;
@@ -562,22 +567,108 @@ export class PodScene {
     const group = new THREE.Group();
     group.userData["slaveId"] = slaveId;
 
-    const podMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(POD_VISUAL_RADIUS, 18, 14),
-      new THREE.MeshStandardMaterial({
-        color: "#00add8",
-        roughness: 0.45,
-        metalness: 0.05,
-        emissive: "#0f4a60",
-        transparent: true,
-        opacity: 0.96,
-      }),
-    );
-    podMesh.scale.set(1, POD_VISUAL_STRETCH_Y, 1);
-    group.add(podMesh);
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+      color: "#00add8",
+      roughness: 0.76,
+      metalness: 0.02,
+      emissive: "#0b5d78",
+    });
+    const featureMaterial = new THREE.MeshStandardMaterial({
+      color: "#ffffff",
+      roughness: 0.82,
+      metalness: 0,
+    });
+    const muzzleMaterial = new THREE.MeshStandardMaterial({
+      color: "#ebf4f7",
+      roughness: 0.86,
+      metalness: 0,
+    });
+    const noseMaterial = new THREE.MeshStandardMaterial({
+      color: "#243743",
+      roughness: 0.72,
+      metalness: 0.04,
+    });
+    const pupilMaterial = new THREE.MeshStandardMaterial({
+      color: "#11161b",
+      roughness: 0.62,
+      metalness: 0.01,
+    });
+
+    const hips = new THREE.Mesh(new THREE.SphereGeometry(0.02, 22, 16), bodyMaterial);
+    hips.position.set(0, -0.03, -0.002);
+    hips.scale.set(0.8, 1.18, 0.78);
+    group.add(hips);
+
+    const torso = new THREE.Mesh(new THREE.SphereGeometry(0.025, 24, 18), bodyMaterial);
+    torso.position.set(0, -0.005, 0);
+    torso.scale.set(0.84, 1.58, 0.82);
+    group.add(torso);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.031, 24, 18), bodyMaterial);
+    head.position.set(0, 0.034, 0.003);
+    head.scale.set(1.02, 1.1, 0.92);
+    group.add(head);
+
+    const brow = new THREE.Mesh(new THREE.SphereGeometry(0.019, 20, 14), bodyMaterial);
+    brow.position.set(0, 0.045, 0.012);
+    brow.scale.set(1.18, 0.7, 0.78);
+    group.add(brow);
+
+    for (const x of [-0.016, 0.016] as const) {
+      const ear = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 16, 12), bodyMaterial);
+      ear.position.set(x, 0.06, -0.001);
+      ear.scale.set(0.86, 0.76, 0.5);
+      group.add(ear);
+    }
+
+    const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.013, 18, 14), muzzleMaterial);
+    muzzle.position.set(0, 0.017, 0.028);
+    muzzle.scale.set(1.04, 0.72, 0.94);
+    group.add(muzzle);
+
+    for (const x of [-0.0175, 0.0175] as const) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.0115, 16, 12), featureMaterial);
+      eye.position.set(x, 0.038, 0.021);
+      eye.scale.set(0.9, 1.24, 0.7);
+      group.add(eye);
+
+      const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.0042, 12, 10), pupilMaterial);
+      pupil.position.set(x * 0.9, 0.036, 0.03);
+      pupil.scale.set(0.78, 1.12, 0.48);
+      group.add(pupil);
+    }
+
+    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.0048, 12, 10), noseMaterial);
+    nose.position.set(0, 0.016, 0.037);
+    nose.scale.set(1.1, 0.84, 0.68);
+    group.add(nose);
+
+    for (const x of [-0.0036, 0.0036] as const) {
+      const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.0042, 0.013, 0.003), featureMaterial);
+      tooth.position.set(x, 0.002, 0.0375);
+      group.add(tooth);
+    }
+
+    for (const [x, rotation] of [
+      [-0.023, 0.22],
+      [0.023, -0.22],
+    ] as const) {
+      const arm = new THREE.Mesh(new THREE.SphereGeometry(0.007, 14, 10), bodyMaterial);
+      arm.position.set(x, -0.006, 0.014);
+      arm.scale.set(0.46, 1.18, 0.5);
+      arm.rotation.z = rotation;
+      group.add(arm);
+    }
+
+    for (const x of [-0.012, 0.012] as const) {
+      const foot = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 14, 10), bodyMaterial);
+      foot.position.set(x, -0.053, 0.015);
+      foot.scale.set(1.04, 0.44, 1.18);
+      group.add(foot);
+    }
 
     const shield = new THREE.Mesh(
-      new THREE.TorusGeometry(0.06, 0.006, 8, 16),
+      new THREE.TorusGeometry(0.055, 0.0045, 8, 20),
       new THREE.MeshBasicMaterial({
         color: "#bdeffc",
         transparent: true,
@@ -591,7 +682,7 @@ export class PodScene {
 
     return {
       group,
-      podMesh,
+      bodyMaterial,
       shield,
       phase: Math.random() * Math.PI * 2,
     };
@@ -625,7 +716,8 @@ export class PodScene {
     const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(position.x, position.y, position.z)
       .setLinearDamping(8)
-      .setAngularDamping(10)
+      .setAngularDamping(18)
+      .enabledRotations(false, true, false)
       .setCcdEnabled(true)
       .setCanSleep(false);
 
@@ -654,10 +746,31 @@ export class PodScene {
 
   private disposePodEntry(entry: PodMeshEntry): void {
     this.boardGroup.remove(entry.group);
-    entry.podMesh.geometry.dispose();
-    entry.podMesh.material.dispose();
-    entry.shield.geometry.dispose();
-    entry.shield.material.dispose();
+    const disposedGeometries = new Set<THREE.BufferGeometry>();
+    const disposedMaterials = new Set<THREE.Material>();
+    entry.group.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) {
+        return;
+      }
+
+      if (!disposedGeometries.has(object.geometry)) {
+        object.geometry.dispose();
+        disposedGeometries.add(object.geometry);
+      }
+      if (Array.isArray(object.material)) {
+        for (const material of object.material) {
+          if (!disposedMaterials.has(material)) {
+            material.dispose();
+            disposedMaterials.add(material);
+          }
+        }
+      } else {
+        if (!disposedMaterials.has(object.material)) {
+          object.material.dispose();
+          disposedMaterials.add(object.material);
+        }
+      }
+    });
   }
 
   private removePodEntry(slaveId: string, entry: PodMeshEntry): void {
@@ -757,10 +870,16 @@ export class PodScene {
     xrCamera.getWorldPosition(position);
     xrCamera.getWorldDirection(direction);
     direction.y = 0;
-    direction.normalize();
+    if (direction.lengthSq() < 1e-6) {
+      direction.set(0, 0, -1);
+    } else {
+      direction.normalize();
+    }
 
-    const boardPosition = position.clone().add(direction.multiplyScalar(0.45));
-    boardPosition.y = Math.max(0.68, position.y - 0.3);
+    const boardPosition = position
+      .clone()
+      .add(direction.multiplyScalar(PodScene.BOARD_FORWARD_DISTANCE));
+    boardPosition.y = PodScene.BOARD_SURFACE_HEIGHT - PodScene.BOARD_TOP_Y;
     this.boardGroup.position.copy(boardPosition);
     this.boardGroup.lookAt(position.x, boardPosition.y, position.z);
     this.boardGroup.rotateY(Math.PI);
@@ -889,9 +1008,9 @@ export class PodScene {
       }
 
       const infected = Boolean(entry.group.userData["infected"]);
-      entry.podMesh.material.emissiveIntensity = infected
-        ? 0.28 + Math.sin(nowMs * 0.006 + entry.phase) * 0.04
-        : 0.28;
+      entry.bodyMaterial.emissiveIntensity = infected
+        ? 0.22 + Math.sin(nowMs * 0.006 + entry.phase) * 0.04
+        : 0.18;
 
       if (position.y < PodScene.UNDER_TABLE_COLLIDER_Y && !physicsEntry.fallReported) {
         physicsEntry.fallReported = true;
