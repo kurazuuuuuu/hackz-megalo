@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -24,20 +25,28 @@ type Client struct {
 const activeSessionKey = "session:active"
 
 func New(addr, eventsChannel, statesChannel string) *Client {
-	return &Client{
+	client := &Client{
 		raw: goredis.NewClient(&goredis.Options{
 			Addr: addr,
 		}),
 		eventsChannel: eventsChannel,
 		statesChannel: statesChannel,
 	}
+	redisLogf("client initialized addr=%s events_channel=%s states_channel=%s", addr, eventsChannel, statesChannel)
+	return client
 }
 
 func (c *Client) Ping(ctx context.Context) error {
-	return c.raw.Ping(ctx).Err()
+	if err := c.raw.Ping(ctx).Err(); err != nil {
+		redisLogf("ping failed err=%v", err)
+		return err
+	}
+	redisLogf("ping ok")
+	return nil
 }
 
 func (c *Client) Close() error {
+	redisLogf("client closed")
 	return c.raw.Close()
 }
 
@@ -58,6 +67,14 @@ func (c *Client) PublishEvent(ctx context.Context, event domain.Event) error {
 	if err := c.raw.Publish(ctx, c.eventsChannel, payload).Err(); err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}
+	redisLogf(
+		"publish event session_id=%s event_id=%d target_pod=%s key=%s channel=%s",
+		event.SessionID,
+		event.EventID,
+		event.TargetPod,
+		key,
+		c.eventsChannel,
+	)
 	return nil
 }
 
@@ -93,6 +110,14 @@ func (c *Client) CreateSession(ctx context.Context, meta domain.SessionMeta) err
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
+	redisLogf(
+		"create session session_id=%s meta_key=%s metrics_key=%s active_key=%s started_at=%s",
+		meta.SessionID,
+		sessionMetaKey(meta.SessionID),
+		sessionMetricsKey(meta.SessionID),
+		activeSessionKey,
+		meta.StartedAt.Format(time.RFC3339Nano),
+	)
 	return nil
 }
 
@@ -100,10 +125,13 @@ func (c *Client) GetActiveSessionID(ctx context.Context) (string, error) {
 	sessionID, err := c.raw.Get(ctx, activeSessionKey).Result()
 	if err != nil {
 		if err == goredis.Nil {
+			redisLogf("get active session miss key=%s", activeSessionKey)
 			return "", fmt.Errorf("active session not found")
 		}
+		redisLogf("get active session error key=%s err=%v", activeSessionKey, err)
 		return "", fmt.Errorf("get active session: %w", err)
 	}
+	redisLogf("get active session hit key=%s session_id=%s", activeSessionKey, sessionID)
 	return sessionID, nil
 }
 
@@ -111,22 +139,43 @@ func (c *Client) GetSessionMeta(ctx context.Context, sessionID string) (domain.S
 	payload, err := c.raw.Get(ctx, sessionMetaKey(sessionID)).Result()
 	if err != nil {
 		if err == goredis.Nil {
+			redisLogf("get session meta miss session_id=%s key=%s", sessionID, sessionMetaKey(sessionID))
 			return domain.SessionMeta{}, fmt.Errorf("session meta not found: %s", sessionID)
 		}
+		redisLogf("get session meta error session_id=%s key=%s err=%v", sessionID, sessionMetaKey(sessionID), err)
 		return domain.SessionMeta{}, fmt.Errorf("get session meta: %w", err)
 	}
-	return DecodeSessionMeta(payload)
+	meta, err := DecodeSessionMeta(payload)
+	if err != nil {
+		return domain.SessionMeta{}, err
+	}
+	redisLogf("get session meta hit session_id=%s key=%s", sessionID, sessionMetaKey(sessionID))
+	return meta, nil
 }
 
 func (c *Client) GetSessionMetrics(ctx context.Context, sessionID string) (domain.SessionMetrics, error) {
 	payload, err := c.raw.Get(ctx, sessionMetricsKey(sessionID)).Result()
 	if err != nil {
 		if err == goredis.Nil {
+			redisLogf("get session metrics miss session_id=%s key=%s", sessionID, sessionMetricsKey(sessionID))
 			return domain.SessionMetrics{}, fmt.Errorf("session metrics not found: %s", sessionID)
 		}
+		redisLogf("get session metrics error session_id=%s key=%s err=%v", sessionID, sessionMetricsKey(sessionID), err)
 		return domain.SessionMetrics{}, fmt.Errorf("get session metrics: %w", err)
 	}
-	return DecodeSessionMetrics(payload)
+	metrics, err := DecodeSessionMetrics(payload)
+	if err != nil {
+		return domain.SessionMetrics{}, err
+	}
+	redisLogf(
+		"get session metrics hit session_id=%s key=%s live=%d gone=%d updated_at=%s",
+		sessionID,
+		sessionMetricsKey(sessionID),
+		metrics.LiveSlaves,
+		metrics.GoneSlaves,
+		metrics.UpdatedAt.Format(time.RFC3339Nano),
+	)
+	return metrics, nil
 }
 
 func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
@@ -151,6 +200,14 @@ func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("delete session: %w", err)
 	}
+	redisLogf(
+		"delete session session_id=%s active_deleted=%t slave_keys_deleted=%d meta_key=%s metrics_key=%s",
+		sessionID,
+		activeSessionID == sessionID,
+		len(keys),
+		sessionMetaKey(sessionID),
+		sessionMetricsKey(sessionID),
+	)
 	return nil
 }
 
@@ -171,6 +228,16 @@ func (c *Client) PublishSlaveState(ctx context.Context, state domain.SlaveState)
 	if err := c.raw.Publish(ctx, c.statesChannel, payload).Err(); err != nil {
 		return fmt.Errorf("publish slave state: %w", err)
 	}
+	redisLogf(
+		"publish slave state session_id=%s slave_id=%s pod=%s status=%s source=%s key=%s channel=%s",
+		state.SessionID,
+		state.SlaveID,
+		state.K8sPodName,
+		state.Status,
+		state.Source,
+		key,
+		c.statesChannel,
+	)
 	return nil
 }
 
@@ -187,11 +254,18 @@ func (c *Client) GetSlaveState(ctx context.Context, sessionID, slaveID string) (
 	payload, err := c.raw.Get(ctx, key).Result()
 	if err != nil {
 		if err == goredis.Nil {
+			redisLogf("get slave state miss session_id=%s slave_id=%s key=%s", sessionID, slaveID, key)
 			return domain.SlaveState{}, fmt.Errorf("slave state not found: %s", slaveID)
 		}
+		redisLogf("get slave state error session_id=%s slave_id=%s key=%s err=%v", sessionID, slaveID, key, err)
 		return domain.SlaveState{}, fmt.Errorf("get slave state: %w", err)
 	}
-	return DecodeSlaveState(payload)
+	state, err := DecodeSlaveState(payload)
+	if err != nil {
+		return domain.SlaveState{}, err
+	}
+	redisLogf("get slave state hit session_id=%s slave_id=%s key=%s status=%s", sessionID, slaveID, key, state.Status)
+	return state, nil
 }
 
 func (c *Client) ListSlaveStates(ctx context.Context, sessionID string) ([]domain.SlaveState, error) {
@@ -213,6 +287,7 @@ func (c *Client) ListSlaveStates(ctx context.Context, sessionID string) ([]domai
 		}
 		states = append(states, state)
 	}
+	redisLogf("list slave states session_id=%s count=%d pattern=%s", sessionID, len(states), sessionSlavePattern(sessionID))
 	return states, nil
 }
 
@@ -257,15 +332,29 @@ func (c *Client) UpdateSessionMetrics(ctx context.Context, sessionID string, fn 
 			return nil
 		}, key)
 		if err == nil {
+			redisLogf(
+				"update session metrics session_id=%s live=%d gone=%d updated_at=%s attempt=%d",
+				sessionID,
+				updated.LiveSlaves,
+				updated.GoneSlaves,
+				updated.UpdatedAt.Format(time.RFC3339Nano),
+				attempt+1,
+			)
 			return updated, nil
 		}
 		if errors.Is(err, goredis.TxFailedErr) {
 			continue
 		}
+		redisLogf("update session metrics error session_id=%s attempt=%d err=%v", sessionID, attempt+1, err)
 		return domain.SessionMetrics{}, err
 	}
 
+	redisLogf("update session metrics retry exhausted session_id=%s max_retries=%d", sessionID, maxRetries)
 	return domain.SessionMetrics{}, fmt.Errorf("update session metrics: retry limit exceeded for session %s", sessionID)
+}
+
+func redisLogf(format string, args ...any) {
+	log.Printf("[redis] "+format, args...)
 }
 
 func DecodeEvent(payload string) (domain.Event, error) {

@@ -84,16 +84,39 @@ func main() {
 				log.Printf("decode event: %v", err)
 				continue
 			}
+			log.Printf(
+				"received event session_id=%s event_id=%d target_pod=%s source=%s",
+				event.SessionID,
+				event.EventID,
+				event.TargetPod,
+				event.Source,
+			)
 
 			previousState, err := resolveTargetSlaveState(ctx, redisClient, event.SessionID, event.TargetPod)
 			if err != nil {
 				log.Printf("resolve target slave: %v", err)
 				continue
 			}
+			log.Printf(
+				"resolved event target session_id=%s event_id=%d slave_id=%s pod=%s pod_ip=%s status=%s",
+				event.SessionID,
+				event.EventID,
+				previousState.SlaveID,
+				previousState.K8sPodName,
+				previousState.PodIP,
+				previousState.Status,
+			)
 
 			resp, err := executeEventOnTarget(ctx, cfg.SlaveGRPCPort, previousState, event)
 			if err != nil {
-				log.Printf("execute event on %s: %v", previousState.PodIP, err)
+				log.Printf(
+					"execute event failed session_id=%s event_id=%d slave_id=%s pod_ip=%s err=%v",
+					event.SessionID,
+					event.EventID,
+					previousState.SlaveID,
+					previousState.PodIP,
+					err,
+				)
 				continue
 			}
 
@@ -110,7 +133,14 @@ func main() {
 				continue
 			}
 
-			log.Printf("event %d processed by slave_id=%s status=%s accepted=%v", event.EventID, state.SlaveID, state.Status, resp.GetAccepted())
+			log.Printf(
+				"event processed session_id=%s event_id=%d slave_id=%s status=%s accepted=%v",
+				event.SessionID,
+				event.EventID,
+				state.SlaveID,
+				state.Status,
+				resp.GetAccepted(),
+			)
 		}
 	}
 }
@@ -263,10 +293,19 @@ func subscribeStateUpdates(ctx context.Context, redisClient *redislayer.Client, 
 				log.Printf("decode slave state: %v", err)
 				continue
 			}
+			log.Printf(
+				"controller observed slave state update session_id=%s slave_id=%s pod=%s status=%s death_reason=%s source=%s",
+				state.SessionID,
+				state.SlaveID,
+				state.K8sPodName,
+				state.Status,
+				state.DeathReason,
+				state.Source,
+			)
 
 			previousState := observedStates.remember(state)
 			if err := notifyGoneSlave(ctx, slaveGRPCPort, previousState, state); err != nil {
-				log.Printf("notify gone slave %s: %v", state.SlaveID, err)
+				log.Printf("notify gone slave session_id=%s slave_id=%s pod=%s: %v", state.SessionID, state.SlaveID, state.K8sPodName, err)
 			}
 		}
 	}

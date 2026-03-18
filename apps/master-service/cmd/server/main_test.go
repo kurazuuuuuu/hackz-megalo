@@ -285,35 +285,44 @@ func TestWebSocketSessionLifecycleAndSingleClient(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		if !server.tryReserveSessionSlot() {
+		sessionMeta, resumed, ok := server.tryBeginSessionConnection()
+		if !ok {
 			http.Error(w, "active session already exists", http.StatusConflict)
 			return
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			server.releaseSessionSlot("")
+			if resumed {
+				server.handleConnectionClosed(sessionMeta.SessionID, false)
+			} else {
+				server.abortPendingSession()
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		sessionMeta, err := server.startSession(r.Context())
-		if err != nil {
-			server.releaseSessionSlot("")
-			_ = conn.Close()
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if !resumed {
+			sessionMeta, err = server.startSession(r.Context())
+			if err != nil {
+				server.abortPendingSession()
+				_ = conn.Close()
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			server.commitSession(sessionMeta)
 		}
 
 		server.hub.add(conn)
+		explicitDisconnect := false
 		defer func() {
 			server.hub.remove(conn)
-			_ = server.endSession(context.Background(), sessionMeta.SessionID)
-			server.releaseSessionSlot(sessionMeta.SessionID)
+			server.handleConnectionClosed(sessionMeta.SessionID, explicitDisconnect)
 		}()
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
+				explicitDisconnect = websocket.IsCloseError(err, websocketExplicitDisconnectCode)
 				return
 			}
 		}
@@ -355,8 +364,50 @@ func TestWebSocketSessionLifecycleAndSingleClient(t *testing.T) {
 		t.Fatalf("second response status = %v, want %d", resp, http.StatusConflict)
 	}
 
+	if err := firstConn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second),
+	); err != nil {
+		t.Fatalf("WriteControl(normal close) error = %v", err)
+	}
 	if err := firstConn.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		activeSessionID, err = server.redisClient.GetActiveSessionID(context.Background())
+		if err == nil && activeSessionID == server.currentSessionID() && activeSessionID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if activeSessionID == "" {
+		t.Fatal("active session should remain during disconnect grace")
+	}
+
+	resumedConn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("Dial(resume) error = %v (status=%s)", err, resp.Status)
+		}
+		t.Fatalf("Dial(resume) error = %v", err)
+	}
+
+	if got := server.currentSessionID(); got != activeSessionID {
+		t.Fatalf("currentSessionID() = %q, want %q", got, activeSessionID)
+	}
+
+	if err := resumedConn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocketExplicitDisconnectCode, "session_end"),
+		time.Now().Add(time.Second),
+	); err != nil {
+		t.Fatalf("WriteControl(explicit close) error = %v", err)
+	}
+	if err := resumedConn.Close(); err != nil {
+		t.Fatalf("Close(resume) error = %v", err)
 	}
 
 	deadline = time.Now().Add(2 * time.Second)
@@ -366,7 +417,7 @@ func TestWebSocketSessionLifecycleAndSingleClient(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("active session should be cleaned up after websocket close")
+	t.Fatalf("active session should be cleaned up after explicit websocket close")
 }
 
 func TestWithCORSAddsHeadersAndOptions(t *testing.T) {
@@ -401,8 +452,9 @@ func newTestMasterServer(t *testing.T) *masterServer {
 	t.Cleanup(func() { _ = client.Close() })
 
 	return &masterServer{
-		redisClient: client,
-		hub:         newWebsocketHub(),
+		redisClient:                  client,
+		hub:                          newWebsocketHub(),
+		sessionDisconnectGracePeriod: 100 * time.Millisecond,
 	}
 }
 
@@ -418,5 +470,9 @@ func createActiveSession(t *testing.T, server *masterServer, sessionID string) {
 	}
 	server.mu.Lock()
 	server.sessionID = sessionID
+	server.sessionMeta = domain.SessionMeta{
+		SessionID: sessionID,
+		StartedAt: time.Now().UTC(),
+	}
 	server.mu.Unlock()
 }

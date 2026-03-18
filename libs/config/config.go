@@ -15,9 +15,10 @@ type RedisConfig struct {
 }
 
 type MasterConfig struct {
-	HTTPAddr         string
-	Redis            RedisConfig
-	CloudflareAccess CloudflareAccessConfig
+	HTTPAddr                     string
+	Redis                        RedisConfig
+	SessionDisconnectGracePeriod time.Duration
+	CloudflareAccess             CloudflareAccessConfig
 }
 
 type CloudflareAccessConfig struct {
@@ -55,6 +56,10 @@ func LoadMaster() (MasterConfig, error) {
 			EventsChannel: envOrDefault("MASTER_REDIS_EVENTS_CHANNEL", "game.events"),
 			StatesChannel: envOrDefault("MASTER_REDIS_STATES_CHANNEL", "slave.states"),
 		},
+		SessionDisconnectGracePeriod: envOrDefaultDuration(
+			"MASTER_SESSION_DISCONNECT_GRACE_PERIOD",
+			30*time.Second,
+		),
 		CloudflareAccess: CloudflareAccessConfig{
 			Enabled:      envOrDefaultBool("MASTER_CLOUDFLARE_ACCESS_ENABLED", false),
 			TeamDomain:   strings.TrimSpace(envOrDefault("MASTER_CLOUDFLARE_ACCESS_TEAM_DOMAIN", "")),
@@ -68,6 +73,9 @@ func LoadMaster() (MasterConfig, error) {
 	}
 	if err := validateRedis(cfg.Redis); err != nil {
 		return MasterConfig{}, err
+	}
+	if cfg.SessionDisconnectGracePeriod < 0 {
+		return MasterConfig{}, fmt.Errorf("MASTER_SESSION_DISCONNECT_GRACE_PERIOD must be greater than or equal to zero")
 	}
 	if err := validateCloudflareAccess(cfg.CloudflareAccess); err != nil {
 		return MasterConfig{}, err

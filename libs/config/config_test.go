@@ -1,12 +1,16 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadMasterDefaults(t *testing.T) {
 	t.Setenv("MASTER_HTTP_ADDR", "")
 	t.Setenv("MASTER_REDIS_ADDR", "")
 	t.Setenv("MASTER_REDIS_EVENTS_CHANNEL", "")
 	t.Setenv("MASTER_REDIS_STATES_CHANNEL", "")
+	t.Setenv("MASTER_SESSION_DISCONNECT_GRACE_PERIOD", "")
 	t.Setenv("MASTER_CLOUDFLARE_ACCESS_ENABLED", "")
 	t.Setenv("MASTER_CLOUDFLARE_ACCESS_TEAM_DOMAIN", "")
 	t.Setenv("MASTER_CLOUDFLARE_ACCESS_AUDIENCE", "")
@@ -27,6 +31,13 @@ func TestLoadMasterDefaults(t *testing.T) {
 	if cfg.Redis.Addr != "localhost:6379" {
 		t.Fatalf("Redis.Addr = %q, want %q", cfg.Redis.Addr, "localhost:6379")
 	}
+	if cfg.SessionDisconnectGracePeriod != 30*time.Second {
+		t.Fatalf(
+			"SessionDisconnectGracePeriod = %s, want %s",
+			cfg.SessionDisconnectGracePeriod,
+			30*time.Second,
+		)
+	}
 	if cfg.CloudflareAccess.Enabled {
 		t.Fatalf("CloudflareAccess.Enabled = %t, want false", cfg.CloudflareAccess.Enabled)
 	}
@@ -35,6 +46,14 @@ func TestLoadMasterDefaults(t *testing.T) {
 	}
 	if cfg.CloudflareAccess.TokenCookie != "CF_Authorization" {
 		t.Fatalf("CloudflareAccess.TokenCookie = %q, want %q", cfg.CloudflareAccess.TokenCookie, "CF_Authorization")
+	}
+}
+
+func TestLoadMasterRejectsNegativeSessionDisconnectGracePeriod(t *testing.T) {
+	t.Setenv("MASTER_SESSION_DISCONNECT_GRACE_PERIOD", "-1s")
+
+	if _, err := LoadMaster(); err == nil {
+		t.Fatal("LoadMaster() error = nil, want validation error")
 	}
 }
 
