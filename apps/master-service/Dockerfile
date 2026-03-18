@@ -5,7 +5,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY apps ./apps
+COPY apps/master-service ./apps/master-service
 COPY libs ./libs
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/master-service ./apps/master-service/cmd/server
