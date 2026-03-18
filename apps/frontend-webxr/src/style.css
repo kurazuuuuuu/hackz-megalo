@@ -98,12 +98,46 @@ h4 {
 }
 
 .start-screen {
+  position: relative;
+  isolation: isolate;
   min-height: calc(100vh - 48px);
   display: grid;
   align-items: center;
+  overflow: hidden;
+}
+
+.start-screen::before,
+.start-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.start-screen::before {
+  background:
+    radial-gradient(circle at 14% 18%, rgba(255, 255, 255, 0.84), transparent 26%),
+    linear-gradient(
+      102deg,
+      rgba(243, 246, 248, 0.94) 8%,
+      rgba(243, 246, 248, 0.78) 36%,
+      rgba(243, 246, 248, 0.18) 74%
+    ),
+    url("/assets/machine-colorized.svg") calc(100% + 140px) center / min(78vw, 920px) auto no-repeat;
+  opacity: 0.34;
+  filter: saturate(0.82);
+  z-index: -2;
+}
+
+.start-screen::after {
+  background:
+    radial-gradient(circle at 78% 50%, rgba(0, 173, 216, 0.1), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(237, 242, 246, 0.2));
+  z-index: -1;
 }
 
 .start-frame {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
   gap: 24px;
@@ -123,6 +157,9 @@ h4 {
 }
 
 .start-copy {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   min-height: 360px;
   padding: clamp(28px, 5vw, 56px);
   display: grid;
@@ -131,6 +168,40 @@ h4 {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(246, 250, 252, 0.92)),
     linear-gradient(135deg, rgba(0, 173, 216, 0.08), transparent 55%);
+}
+
+.start-copy::before,
+.start-copy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.start-copy::before {
+  background:
+    linear-gradient(
+      108deg,
+      rgba(248, 250, 252, 0.96) 0%,
+      rgba(248, 250, 252, 0.76) 40%,
+      rgba(248, 250, 252, 0.16) 88%
+    ),
+    url("/assets/machine-colorized.svg") calc(100% + 72px) center / min(54vw, 720px) auto no-repeat;
+  opacity: 0.22;
+  mix-blend-mode: multiply;
+  z-index: 0;
+}
+
+.start-copy::after {
+  background:
+    linear-gradient(145deg, rgba(0, 173, 216, 0.06), transparent 46%),
+    radial-gradient(circle at 84% 48%, rgba(0, 173, 216, 0.08), transparent 26%);
+  z-index: 0;
+}
+
+.start-copy > * {
+  position: relative;
+  z-index: 1;
 }
 
 .start-panel {
@@ -696,6 +767,28 @@ h4 {
 
   .start-screen {
     min-height: calc(100vh - 28px);
+  }
+
+  .start-screen::before {
+    background-position:
+      14% 18%,
+      0 0,
+      calc(100% + 150px) center;
+    background-size:
+      auto,
+      auto,
+      min(118vw, 760px) auto;
+    opacity: 0.28;
+  }
+
+  .start-copy::before {
+    background-position:
+      0 0,
+      calc(100% + 112px) center;
+    background-size:
+      auto,
+      min(132vw, 700px) auto;
+    opacity: 0.18;
   }
 
   .start-copy,
