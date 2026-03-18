@@ -77,64 +77,6 @@ resource "google_cloudbuildv2_repository" "github_repo" {
   remote_uri        = "https://github.com/${var.github_owner}/${var.github_repository}.git"
 }
 
-
-# PR Triggers: Only run docker build to ensure code compiles.
-resource "google_cloudbuild_trigger" "pr_trigger" {
-  for_each = toset(local.apps)
-
-  location        = var.region
-  name            = "${each.key}-pr-trigger"
-  description     = "Trigger for PRs modifying ${each.key}"
-  service_account = "projects/${var.project_id}/serviceAccounts/${google_service_account.cicd_build_sa.email}"
-
-  repository_event_config {
-    repository = google_cloudbuildv2_repository.github_repo.id
-    pull_request {
-      branch = ".*main.*"
-    }
-  }
-
-  included_files = local.app_included_files[each.key]
-
-  build {
-    step {
-      id         = "build-image"
-      name       = "gcr.io/cloud-builders/docker"
-      entrypoint = "bash"
-      args = [
-        "-c",
-        <<-EOT
-          if [ "${each.key}" = "frontend-webxr" ]; then
-            docker build \
-              -f apps/${each.key}/Dockerfile \
-              --build-arg VITE_API_BASE_URL="$$VITE_API_BASE_URL" \
-              --build-arg VITE_WS_URL="$$VITE_WS_URL" \
-              -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:pr-$SHORT_SHA \
-              .
-          else
-            docker build \
-              -f apps/${each.key}/Dockerfile \
-              -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/${each.key}:pr-$SHORT_SHA \
-              .
-          fi
-        EOT
-      ]
-      secret_env = ["VITE_API_BASE_URL", "VITE_WS_URL"]
-    }
-
-    available_secrets {
-      secret_manager {
-        env          = "VITE_API_BASE_URL"
-        version_name = "projects/${var.project_id}/secrets/vite-api-base-url/versions/latest"
-      }
-      secret_manager {
-        env          = "VITE_WS_URL"
-        version_name = "projects/${var.project_id}/secrets/vite-ws-url/versions/latest"
-      }
-    }
-  }
-}
-
 # Push Trigger: Build all deployable images, push them, and create a single Cloud Deploy release.
 resource "google_cloudbuild_trigger" "push_trigger" {
   location        = var.region
