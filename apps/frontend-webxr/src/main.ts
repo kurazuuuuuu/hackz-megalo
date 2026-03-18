@@ -11,6 +11,8 @@ import { PodScene } from "./scene.ts";
 import { GameStore, getEffectiveCounts, getPods } from "./store.ts";
 import type { DeathReason, SlaveState } from "./types.ts";
 
+type ReservedDesktopBinding = "KeyE" | "KeyR";
+
 const app = document.querySelector<HTMLDivElement>("#app");
 
 if (!app) {
@@ -21,53 +23,74 @@ app.innerHTML = `
   <div class="shell">
     <section class="start-screen" data-screen="start">
       <div class="start-frame">
-        <div class="start-copy">
+        <div class="start-copy gopher-peek-target gopher-peek-panel">
           <p class="eyebrow">Go | Kubernetes</p>
           <h2>コンテナをオーケストレーションする</h2>
         </div>
-        <div class="start-panel">
+        <div class="start-panel gopher-peek-target gopher-peek-panel">
           <div class="start-meta">
-            <span class="pill accent" data-xr-badge>WebXR: checking</span>
+            <span class="pill accent gopher-peek-target" data-xr-badge>WebXR: checking</span>
             <p class="status-line" data-start-status>セッション開始待機中</p>
           </div>
           <div class="start-actions">
-            <button class="start-button" type="button" data-start-session>Start Session</button>
+            <button class="start-button gopher-peek-target" type="button" data-start-session>
+              Start Session
+            </button>
           </div>
         </div>
       </div>
     </section>
 
     <section class="game-shell hidden" data-screen="game">
-      <header class="topbar">
+      <header class="topbar gopher-peek-target gopher-peek-panel">
         <div class="topbar-brand">
           <p class="eyebrow">Hackz Megalo</p>
           <h2>Pod Console</h2>
         </div>
-        <div class="session-block">
+        <div class="session-block gopher-peek-target">
           <span class="session-label">session</span>
           <strong data-session-id>not connected</strong>
         </div>
         <div class="status-pills">
-          <span class="pill" data-connection-pill>セッション開始待機中</span>
-          <span class="pill" data-live-pill>Live 0</span>
-          <span class="pill" data-gone-pill>Gone 0</span>
-          <span class="pill" data-mode-pill>Desktop</span>
+          <span class="pill gopher-peek-target" data-connection-pill>セッション開始待機中</span>
+          <span class="pill gopher-peek-target" data-live-pill>Live 0</span>
+          <span class="pill gopher-peek-target" data-gone-pill>Gone 0</span>
+          <span class="pill gopher-peek-target" data-mode-pill>Desktop</span>
         </div>
         <div class="session-actions">
-          <button type="button" class="session-button" data-enter-xr hidden>Enter WebXR</button>
-          <button type="button" class="session-button danger" data-disconnect>Disconnect</button>
+          <button type="button" class="session-button gopher-peek-target" data-enter-xr hidden>
+            Enter WebXR
+          </button>
+          <button type="button" class="session-button danger gopher-peek-target" data-disconnect>
+            Disconnect
+          </button>
         </div>
       </header>
 
       <div class="layout">
-        <section class="field-panel">
+        <section class="field-panel gopher-peek-target gopher-peek-panel">
           <div class="panel-heading">
             <div>
               <p class="eyebrow">Pods</p>
               <h3 data-pod-count>0 live / 0 gone</h3>
             </div>
           </div>
-          <div class="scene-runtime-root" data-scene-root aria-hidden="true"></div>
+          <div class="scene-frame" data-scene-frame>
+            <div class="scene-runtime-root" data-scene-root></div>
+            <div class="scene-overlay" aria-hidden="true">
+              <div class="scene-instructions">
+                <span>WASD Fly</span>
+                <span>RMB Look</span>
+                <span>LMB Squash</span>
+                <span>DblClick Lock</span>
+                <span>Esc Unlock</span>
+                <span>E / R Reserved</span>
+              </div>
+              <div class="scene-reticle">
+                <span class="scene-reticle-dot"></span>
+              </div>
+            </div>
+          </div>
           <div class="pod-table-head" aria-hidden="true">
             <span>Pod</span>
             <span>Status</span>
@@ -79,12 +102,12 @@ app.innerHTML = `
         </section>
 
         <aside class="side-panel">
-          <section class="panel-card">
+          <section class="panel-card gopher-peek-target gopher-peek-panel">
             <p class="eyebrow">Selected</p>
             <div data-selected-panel class="empty-panel">No pod selected</div>
           </section>
 
-          <section class="panel-card">
+          <section class="panel-card gopher-peek-target gopher-peek-panel">
             <p class="eyebrow">Events</p>
             <ul class="activity-list" data-activity-list></ul>
           </section>
@@ -92,6 +115,7 @@ app.innerHTML = `
       </div>
     </section>
   </div>
+  <div class="gopher-peek-follower" aria-hidden="true" data-gopher-peek-follower></div>
 `;
 
 const store = new GameStore();
@@ -110,9 +134,11 @@ const podCount = requiredElement<HTMLElement>("[data-pod-count]");
 const selectedPanel = requiredElement<HTMLElement>("[data-selected-panel]");
 const podStrip = requiredElement<HTMLElement>("[data-pod-strip]");
 const activityList = requiredElement<HTMLUListElement>("[data-activity-list]");
+const sceneFrame = requiredElement<HTMLElement>("[data-scene-frame]");
 const sceneRoot = requiredElement<HTMLElement>("[data-scene-root]");
 const disconnectButton = requiredElement<HTMLButtonElement>("[data-disconnect]");
 const enterXRButton = requiredElement<HTMLButtonElement>("[data-enter-xr]");
+const gopherPeekFollower = requiredElement<HTMLElement>("[data-gopher-peek-follower]");
 
 const scene = new PodScene(sceneRoot, {
   onSelect: (slaveId) => {
@@ -133,11 +159,17 @@ const scene = new PodScene(sceneRoot, {
   onXRStateChange: (active) => {
     store.setXRActive(active);
   },
+  onDesktopBinding: (key, targetId) => {
+    dispatchDesktopBinding(key, targetId);
+  },
 });
 
 let socket: WebSocket | null = null;
 let metricsRefreshTimer = 0;
 let connectionAttemptId = 0;
+let gopherPeekTarget: HTMLElement | null = null;
+let gopherPeekPointerX = 0;
+let gopherPeekPointerY = 0;
 
 startButton.addEventListener("click", () => {
   void startSession();
@@ -149,6 +181,52 @@ enterXRButton.addEventListener("click", () => {
 
 disconnectButton.addEventListener("click", () => {
   void disconnectSession("Session disconnected.");
+});
+
+app.addEventListener("pointermove", (event) => {
+  const target = findGopherPeekTarget(event.target);
+  if (!target) {
+    if (gopherPeekTarget) {
+      hideGopherPeek();
+    }
+    return;
+  }
+
+  gopherPeekPointerX = event.clientX;
+  gopherPeekPointerY = event.clientY;
+  showGopherPeek(target);
+});
+
+app.addEventListener("pointerleave", () => {
+  if (gopherPeekTarget) {
+    hideGopherPeek();
+  }
+});
+
+window.addEventListener(
+  "scroll",
+  () => {
+    if (!gopherPeekTarget) {
+      return;
+    }
+
+    const target = findGopherPeekTarget(
+      document.elementFromPoint(gopherPeekPointerX, gopherPeekPointerY),
+    );
+    if (!target) {
+      hideGopherPeek();
+      return;
+    }
+
+    showGopherPeek(target);
+  },
+  { passive: true },
+);
+
+window.addEventListener("resize", () => {
+  if (gopherPeekTarget) {
+    updateGopherPeekPosition();
+  }
 });
 
 window.addEventListener("beforeunload", () => {
@@ -165,6 +243,7 @@ store.subscribe((state) => {
   const selected = state.selectedPodId ? (state.podsById[state.selectedPodId] ?? null) : null;
   const counts = getEffectiveCounts(state);
   const xrAvailableText = state.xrSupported ? "WebXR ready" : "Desktop only";
+  const desktopSceneActive = state.phase === "playing" && !state.xrActive;
 
   xrBadge.textContent = xrAvailableText;
   startStatus.textContent = state.errorMessage ?? state.connectionMessage;
@@ -176,12 +255,15 @@ store.subscribe((state) => {
   connectionPill.textContent = state.connectionMessage;
   livePill.textContent = `Live ${counts.live}`;
   gonePill.textContent = `Gone ${counts.gone}`;
-  modePill.textContent = state.xrActive ? "WebXR" : "Monitor";
+  modePill.textContent = state.xrActive ? "WebXR" : "Desktop 3D";
   podCount.textContent = `${counts.live} live / ${counts.gone} gone`;
 
   startButton.disabled = state.phase === "connecting";
   enterXRButton.hidden = !state.xrSupported || state.xrActive || state.phase !== "playing";
   disconnectButton.textContent = state.xrActive ? "Disconnect + Exit XR" : "Disconnect";
+  sceneFrame.classList.toggle("is-desktop-active", desktopSceneActive);
+  sceneFrame.classList.toggle("is-xr-active", state.xrActive);
+  scene.setDesktopActive(desktopSceneActive);
 
   renderSelectedPanel(selected);
   renderPodStrip(pods, state.selectedPodId, state.hoveredPodId);
@@ -195,6 +277,58 @@ store.subscribe((state) => {
     xrActive: state.xrActive,
   });
 });
+
+function dispatchDesktopBinding(key: ReservedDesktopBinding, targetId: string | null): void {
+  window.dispatchEvent(
+    new CustomEvent("frontend-webxr:desktop-binding", {
+      detail: { key, targetId },
+    }),
+  );
+}
+
+function findGopherPeekTarget(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+
+  return target.closest<HTMLElement>(".gopher-peek-target");
+}
+
+function showGopherPeek(target: HTMLElement): void {
+  gopherPeekTarget = target;
+  gopherPeekFollower.classList.add("is-visible");
+  updateGopherPeekPosition();
+}
+
+function hideGopherPeek(): void {
+  gopherPeekTarget = null;
+  gopherPeekFollower.classList.remove("is-visible");
+}
+
+function updateGopherPeekPosition(): void {
+  if (!gopherPeekTarget) {
+    return;
+  }
+
+  const followerRect = gopherPeekFollower.getBoundingClientRect();
+  const width = followerRect.width || 40;
+  const height = followerRect.height || width * (457 / 336);
+  const horizontalPadding = 8;
+  const verticalPadding = 8;
+  const left = clamp(
+    gopherPeekPointerX + 12,
+    horizontalPadding,
+    window.innerWidth - width - horizontalPadding,
+  );
+  const top = clamp(
+    gopherPeekPointerY - height * 0.72,
+    verticalPadding,
+    window.innerHeight - height - verticalPadding,
+  );
+
+  gopherPeekFollower.style.setProperty("--gopher-peek-left", `${left}px`);
+  gopherPeekFollower.style.setProperty("--gopher-peek-top", `${top}px`);
+}
 
 async function probeXRSupport(): Promise<void> {
   const maybeXR = navigator as Navigator & {
@@ -525,7 +659,7 @@ function renderPodStrip(
   for (const pod of pods) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "pod-chip";
+    button.className = "pod-chip gopher-peek-target";
     if (pod.slave_id === selectedPodId) {
       button.classList.add("is-selected");
     }
@@ -583,6 +717,10 @@ function renderActivity(activity: ReturnType<GameStore["getState"]>["activity"])
     `;
     activityList.append(item);
   }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 function renderPodAvatarMarkup(pod: SlaveState): string {

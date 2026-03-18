@@ -11,6 +11,7 @@ interface PodSceneCallbacks {
   onDisconnect: () => void;
   onPodFall: (slaveId: string) => void;
   onXRStateChange: (active: boolean) => void;
+  onDesktopBinding?: (key: ReservedDesktopBinding, targetId: string | null) => void;
 }
 
 interface PodMeshEntry {
@@ -90,6 +91,8 @@ interface HandJointTracking {
   indexWorld: THREE.Vector3 | null;
 }
 
+type ReservedDesktopBinding = "KeyE" | "KeyR";
+
 const HAND_PROFILE_ASSET_PATH = `${import.meta.env.BASE_URL}assets/webxr-hands/generic-hand/`;
 const POD_VISUAL_RADIUS = 0.034;
 const POD_VISUAL_STRETCH_Y = 1.45;
@@ -122,6 +125,11 @@ const HUD_TABLE_SLIDER_HEIGHT = 0.026;
 const HUD_TABLE_SLIDER_DEPTH_TOLERANCE = 0.05;
 const HUD_TABLE_SLIDER_DRAG_MARGIN = 0.018;
 const XR_FOVEATION_LEVEL = 0;
+const DESKTOP_LOOK_SENSITIVITY = 0.0024;
+const DESKTOP_MOVE_SPEED = 0.6;
+const DESKTOP_MIN_PITCH = -Math.PI * 0.48;
+const DESKTOP_MAX_PITCH = Math.PI * 0.48;
+const DESKTOP_RETICLE_NDC = new THREE.Vector2(0, 0);
 
 function statusColor(pod: SlaveState): string {
   if (pod.status === "SLAVE_STATUS_GONE") {
@@ -208,6 +216,16 @@ export class PodScene {
 
   private readonly tmpMatrix = new THREE.Matrix4();
 
+  private readonly desktopRaycaster = new THREE.Raycaster();
+
+  private readonly tmpDirection = new THREE.Vector3();
+
+  private readonly tmpRight = new THREE.Vector3();
+
+  private readonly tmpMove = new THREE.Vector3();
+
+  private readonly desktopPressedKeys = new Set<string>();
+
   private physicsWorld: RAPIER.World | null = null;
 
   private boardColliderDebugMesh: ColliderDebugMesh | null = null;
@@ -245,14 +263,23 @@ export class PodScene {
 
   private lastDisconnectAt = 0;
 
+  private desktopInputActive = false;
+
+  private desktopLookActive = false;
+
+  private desktopYaw = 0;
+
+  private desktopPitch = -0.24;
+
+  private desktopTargetPodId: string | null = null;
+
   constructor(container: HTMLElement, callbacks: PodSceneCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
     this.scene = new THREE.Scene();
 
     this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    this.camera.position.set(0, 4.3, 7.4);
-    this.camera.lookAt(0, 0.8, 0);
+    this.resetDesktopCamera();
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.xr.enabled = true;
@@ -260,7 +287,10 @@ export class PodScene {
     this.applyRenderScale();
     this.renderer.setSize(this.container.clientWidth || 1, this.container.clientHeight || 1, false);
     this.renderer.domElement.className = "pod-scene-canvas";
+    this.renderer.domElement.tabIndex = 0;
+    this.renderer.domElement.setAttribute("aria-label", "Desktop Pod scene");
     this.container.append(this.renderer.domElement);
+    this.bindDesktopControls();
 
     this.scene.add(new THREE.HemisphereLight("#f9fcff", "#d8e1e8", 2.1));
 
@@ -374,6 +404,25 @@ export class PodScene {
     void this.initializePhysics();
   }
 
+  setDesktopActive(active: boolean): void {
+    if (this.desktopInputActive === active) {
+      return;
+    }
+
+    this.desktopInputActive = active;
+
+    if (active) {
+      this.resize();
+      this.renderer.domElement.focus();
+      return;
+    }
+
+    this.exitPointerLock();
+    this.desktopPressedKeys.clear();
+    this.setDesktopLookActive(false);
+    this.setDesktopTargetPod(null, false);
+  }
+
   update(
     pods: SlaveState[],
     selectedPodId: string | null,
@@ -473,6 +522,10 @@ export class PodScene {
       return;
     }
 
+    this.exitPointerLock();
+    this.desktopPressedKeys.clear();
+    this.setDesktopLookActive(false);
+    this.setDesktopTargetPod(null, false);
     this.applyRenderScale();
     const session = await maybeXR.xr.requestSession("immersive-ar", {
       requiredFeatures: ["local-floor"],
@@ -535,6 +588,11 @@ export class PodScene {
 
     this.wristAnchor.visible = false;
     this.resetBoardPlacement();
+    this.resetDesktopCamera();
+    this.exitPointerLock();
+    this.desktopPressedKeys.clear();
+    this.setDesktopLookActive(false);
+    this.setDesktopTargetPod(null, false);
     this.pinchLatch = false;
     this.lastDisconnectAt = 0;
     this.hudSliderActiveHand = null;
@@ -548,6 +606,11 @@ export class PodScene {
   dispose(): void {
     this.resizeObserver.disconnect();
     this.renderer.setAnimationLoop(null);
+    this.unbindDesktopControls();
+    this.exitPointerLock();
+    this.desktopPressedKeys.clear();
+    this.setDesktopLookActive(false);
+    this.setDesktopTargetPod(null, false);
 
     for (const entry of this.meshById.values()) {
       this.disposePodEntry(entry);
@@ -583,6 +646,319 @@ export class PodScene {
 
     this.renderer.dispose();
   }
+
+  private bindDesktopControls(): void {
+    this.renderer.domElement.addEventListener("contextmenu", this.handleDesktopContextMenu);
+    this.renderer.domElement.addEventListener("pointerdown", this.handleDesktopPointerDown);
+    this.renderer.domElement.addEventListener("dblclick", this.handleDesktopDoubleClick);
+    window.addEventListener("pointermove", this.handleDesktopPointerMove);
+    window.addEventListener("pointerup", this.handleDesktopPointerUp);
+    window.addEventListener("keydown", this.handleDesktopKeyDown);
+    window.addEventListener("keyup", this.handleDesktopKeyUp);
+    window.addEventListener("blur", this.handleDesktopWindowBlur);
+    document.addEventListener("pointerlockchange", this.handlePointerLockChange);
+    document.addEventListener("pointerlockerror", this.handlePointerLockError);
+  }
+
+  private unbindDesktopControls(): void {
+    this.renderer.domElement.removeEventListener("contextmenu", this.handleDesktopContextMenu);
+    this.renderer.domElement.removeEventListener("pointerdown", this.handleDesktopPointerDown);
+    this.renderer.domElement.removeEventListener("dblclick", this.handleDesktopDoubleClick);
+    window.removeEventListener("pointermove", this.handleDesktopPointerMove);
+    window.removeEventListener("pointerup", this.handleDesktopPointerUp);
+    window.removeEventListener("keydown", this.handleDesktopKeyDown);
+    window.removeEventListener("keyup", this.handleDesktopKeyUp);
+    window.removeEventListener("blur", this.handleDesktopWindowBlur);
+    document.removeEventListener("pointerlockchange", this.handlePointerLockChange);
+    document.removeEventListener("pointerlockerror", this.handlePointerLockError);
+  }
+
+  private resetDesktopCamera(): void {
+    this.desktopYaw = 0;
+    this.desktopPitch = -0.24;
+    this.camera.position.set(0, 0.36, 0.82);
+    this.camera.rotation.order = "YXZ";
+    this.applyDesktopCameraRotation();
+  }
+
+  private applyDesktopCameraRotation(): void {
+    this.camera.rotation.set(this.desktopPitch, this.desktopYaw, 0);
+    this.camera.updateMatrixWorld();
+  }
+
+  private setDesktopLookActive(active: boolean): void {
+    if (this.desktopLookActive === active) {
+      return;
+    }
+
+    this.desktopLookActive = active;
+    this.renderer.domElement.classList.toggle("is-looking", active);
+  }
+
+  private setDesktopTargetPod(slaveId: string | null, notifyHover = true): void {
+    if (this.desktopTargetPodId === slaveId) {
+      return;
+    }
+
+    this.desktopTargetPodId = slaveId;
+    if (notifyHover) {
+      this.callbacks.onHover(slaveId);
+    }
+    this.updatePointingHighlights();
+  }
+
+  private isDesktopSceneActive(): boolean {
+    return this.desktopInputActive && !this.renderer.xr.isPresenting;
+  }
+
+  private isPointerLocked(): boolean {
+    return document.pointerLockElement === this.renderer.domElement;
+  }
+
+  private requestPointerLock(): void {
+    if (!this.isDesktopSceneActive() || this.isPointerLocked()) {
+      return;
+    }
+
+    this.renderer.domElement.focus();
+    void this.renderer.domElement.requestPointerLock?.();
+  }
+
+  private exitPointerLock(): void {
+    if (!this.isPointerLocked()) {
+      return;
+    }
+
+    document.exitPointerLock?.();
+  }
+
+  private updateDesktopMovement(delta: number): void {
+    if (!this.isDesktopSceneActive() || this.desktopPressedKeys.size === 0) {
+      return;
+    }
+
+    this.camera.getWorldDirection(this.tmpDirection).normalize();
+    this.tmpRight.crossVectors(this.tmpDirection, this.camera.up);
+    if (this.tmpRight.lengthSq() > 1e-6) {
+      this.tmpRight.normalize();
+    }
+
+    this.tmpMove.set(0, 0, 0);
+    if (this.desktopPressedKeys.has("KeyW")) {
+      this.tmpMove.add(this.tmpDirection);
+    }
+    if (this.desktopPressedKeys.has("KeyS")) {
+      this.tmpMove.sub(this.tmpDirection);
+    }
+    if (this.desktopPressedKeys.has("KeyD")) {
+      this.tmpMove.add(this.tmpRight);
+    }
+    if (this.desktopPressedKeys.has("KeyA")) {
+      this.tmpMove.sub(this.tmpRight);
+    }
+
+    if (this.tmpMove.lengthSq() <= 1e-6) {
+      return;
+    }
+
+    this.tmpMove.normalize().multiplyScalar(DESKTOP_MOVE_SPEED * delta);
+    this.camera.position.add(this.tmpMove);
+    this.camera.updateMatrixWorld();
+  }
+
+  private updateDesktopTargeting(): void {
+    if (!this.isDesktopSceneActive()) {
+      this.setDesktopTargetPod(null);
+      return;
+    }
+
+    const targets = Array.from(this.meshById.values(), (entry) => entry.group);
+    if (targets.length === 0) {
+      this.setDesktopTargetPod(null);
+      return;
+    }
+
+    this.camera.updateMatrixWorld();
+    this.boardGroup.updateMatrixWorld(true);
+    this.desktopRaycaster.setFromCamera(DESKTOP_RETICLE_NDC, this.camera);
+    const intersections = this.desktopRaycaster.intersectObjects(targets, true);
+
+    for (const intersection of intersections) {
+      const slaveId = this.resolvePodIdFromObject(intersection.object);
+      if (slaveId && this.isPodInteractable(slaveId)) {
+        this.setDesktopTargetPod(slaveId);
+        return;
+      }
+    }
+
+    this.setDesktopTargetPod(null);
+  }
+
+  private resolvePodIdFromObject(object: THREE.Object3D | null): string | null {
+    let current: THREE.Object3D | null = object;
+    while (current) {
+      const slaveId = current.userData["slaveId"];
+      if (typeof slaveId === "string" && slaveId.length > 0) {
+        return slaveId;
+      }
+      current = current.parent;
+    }
+    return null;
+  }
+
+  private readonly handleDesktopContextMenu = (event: MouseEvent): void => {
+    if (!this.isDesktopSceneActive()) {
+      return;
+    }
+    event.preventDefault();
+  };
+
+  private readonly handleDesktopPointerDown = (event: PointerEvent): void => {
+    if (!this.isDesktopSceneActive()) {
+      return;
+    }
+
+    this.renderer.domElement.focus();
+
+    if (event.button === 2) {
+      if (this.isPointerLocked()) {
+        event.preventDefault();
+        return;
+      }
+      event.preventDefault();
+      this.setDesktopLookActive(true);
+      try {
+        this.renderer.domElement.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore capture failures; desktop look still works with window-level listeners.
+      }
+      return;
+    }
+
+    if (
+      event.button !== 0 ||
+      (this.desktopLookActive && !this.isPointerLocked()) ||
+      !this.desktopTargetPodId
+    ) {
+      return;
+    }
+
+    const targetId = this.desktopTargetPodId;
+    if (!this.isPodInteractable(targetId)) {
+      return;
+    }
+
+    event.preventDefault();
+    this.callbacks.onSelect(targetId);
+    this.startPodCrush(targetId);
+  };
+
+  private readonly handleDesktopDoubleClick = (event: MouseEvent): void => {
+    if (!this.isDesktopSceneActive()) {
+      return;
+    }
+
+    event.preventDefault();
+    this.requestPointerLock();
+  };
+
+  private readonly handleDesktopPointerMove = (event: PointerEvent): void => {
+    if (!this.isDesktopSceneActive() || (!this.desktopLookActive && !this.isPointerLocked())) {
+      return;
+    }
+
+    event.preventDefault();
+    this.desktopYaw -= event.movementX * DESKTOP_LOOK_SENSITIVITY;
+    this.desktopPitch = THREE.MathUtils.clamp(
+      this.desktopPitch - event.movementY * DESKTOP_LOOK_SENSITIVITY,
+      DESKTOP_MIN_PITCH,
+      DESKTOP_MAX_PITCH,
+    );
+    this.applyDesktopCameraRotation();
+  };
+
+  private readonly handleDesktopPointerUp = (event: PointerEvent): void => {
+    if (event.button !== 2) {
+      return;
+    }
+
+    if (this.isPointerLocked()) {
+      return;
+    }
+
+    this.setDesktopLookActive(false);
+    try {
+      this.renderer.domElement.releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture may not be held, which is fine.
+    }
+  };
+
+  private readonly handleDesktopKeyDown = (event: KeyboardEvent): void => {
+    if (!this.isDesktopSceneActive() || shouldIgnoreKeyboardEvent(event)) {
+      return;
+    }
+
+    const { code } = event;
+    if (code === "Escape") {
+      if (this.isPointerLocked()) {
+        event.preventDefault();
+        this.exitPointerLock();
+        return;
+      }
+      if (this.desktopLookActive) {
+        event.preventDefault();
+        this.setDesktopLookActive(false);
+      }
+      return;
+    }
+
+    if (code === "KeyW" || code === "KeyA" || code === "KeyS" || code === "KeyD") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.desktopPressedKeys.add(code);
+      return;
+    }
+
+    if ((code === "KeyE" || code === "KeyR") && !event.repeat) {
+      event.preventDefault();
+      this.callbacks.onDesktopBinding?.(code, this.desktopTargetPodId);
+    }
+  };
+
+  private readonly handleDesktopKeyUp = (event: KeyboardEvent): void => {
+    if (!this.isDesktopSceneActive() || shouldIgnoreKeyboardEvent(event)) {
+      return;
+    }
+
+    const { code } = event;
+    if (code === "KeyW" || code === "KeyA" || code === "KeyS" || code === "KeyD") {
+      event.preventDefault();
+      this.desktopPressedKeys.delete(code);
+    }
+  };
+
+  private readonly handleDesktopWindowBlur = (): void => {
+    this.desktopPressedKeys.clear();
+    this.setDesktopLookActive(false);
+    this.exitPointerLock();
+  };
+
+  private readonly handlePointerLockChange = (): void => {
+    const pointerLocked = this.isPointerLocked();
+    this.renderer.domElement.classList.toggle("is-pointer-locked", pointerLocked);
+    this.setDesktopLookActive(false);
+    if (pointerLocked) {
+      this.renderer.domElement.focus();
+      return;
+    }
+
+    this.desktopPressedKeys.clear();
+  };
+
+  private readonly handlePointerLockError = (): void => {
+    this.renderer.domElement.classList.remove("is-pointer-locked");
+  };
 
   private async initializePhysics(): Promise<void> {
     try {
@@ -925,6 +1301,9 @@ export class PodScene {
         handState.pinchCandidateId = null;
       }
     }
+    if (this.desktopTargetPodId === slaveId) {
+      this.setDesktopTargetPod(null, false);
+    }
   }
 
   private removePodPhysics(slaveId: string): void {
@@ -1263,6 +1642,9 @@ export class PodScene {
       ...this.hudData,
       xrActive: false,
     });
+    this.desktopPressedKeys.clear();
+    this.setDesktopLookActive(false);
+    this.setDesktopTargetPod(null, false);
     this.pinchLatch = false;
     this.hudSliderActiveHand = null;
     this.clearHandState("left", true);
@@ -1298,7 +1680,8 @@ export class PodScene {
       this.clearPalmContacts("right");
       this.clearHandState("left", false);
       this.clearHandState("right", false);
-      this.updatePointingHighlights();
+      this.updateDesktopMovement(delta);
+      this.updateDesktopTargeting();
       this.renderer.render(this.scene, this.camera);
       return;
     }
@@ -2209,13 +2592,21 @@ export class PodScene {
   }
 
   private updatePointingHighlights(): void {
-    const activeTargetId = this.currentFingertipTargetId();
+    const activeTargetId = this.currentAimTargetId();
     for (const [slaveId, entry] of this.meshById) {
       entry.pointOutline.visible =
         Boolean(activeTargetId) &&
         slaveId === activeTargetId &&
         this.isPodInteractable(slaveId, entry);
     }
+  }
+
+  private currentAimTargetId(): string | null {
+    if (this.renderer.xr.isPresenting) {
+      return this.currentFingertipTargetId();
+    }
+
+    return this.desktopTargetPodId;
   }
 
   private currentFingertipTargetId(): string | null {
@@ -2328,4 +2719,22 @@ function hudLocalToCanvasX(localX: number, canvasWidth: number): number {
 
 function hudLocalToCanvasY(localY: number, canvasHeight: number): number {
   return (0.5 - localY / HUD_FACE_HEIGHT) * canvasHeight;
+}
+
+function shouldIgnoreKeyboardEvent(event: KeyboardEvent): boolean {
+  if (event.metaKey || event.ctrlKey || event.altKey) {
+    return true;
+  }
+
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  );
 }
