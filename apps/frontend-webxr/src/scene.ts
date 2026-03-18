@@ -15,10 +15,12 @@ interface PodSceneCallbacks {
 
 interface PodMeshEntry {
   group: THREE.Group;
+  visualRoot: THREE.Group;
   bodyMaterial: THREE.MeshStandardMaterial;
   shield: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
   pointOutline: THREE.Group;
   phase: number;
+  baseMinY: number;
 }
 
 type ColliderDebugMesh = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
@@ -29,6 +31,8 @@ interface PodPhysicsEntry {
   nextImpulseAt: number;
   fallReported: boolean;
   debugMesh: ColliderDebugMesh | null;
+  crushProgress: number;
+  crushReported: boolean;
 }
 
 interface HandPhysicsState {
@@ -48,6 +52,7 @@ interface HandPhysicsState {
   pointingActive: boolean;
   pinchActive: boolean;
   pinchMidpointLocal: THREE.Vector3 | null;
+  pinchMidpointWorld: THREE.Vector3 | null;
   pinchCandidateId: string | null;
   fingertipTargetId: string | null;
   grabbedPodId: string | null;
@@ -75,6 +80,8 @@ interface HudDebugData {
   grabTargetId: string | null;
   fingertipHand: "left" | "right" | null;
   fingertipTargetId: string | null;
+  tableHeightCm: number;
+  tableAdjustingHand: "left" | "right" | null;
 }
 
 interface HandJointTracking {
@@ -102,6 +109,18 @@ const POD_IMPULSE_FEAR_FACTOR = 0.00001;
 const POD_IMPULSE_MAX = 0.0032;
 const POD_IMPULSE_INTERVAL_BASE_MS = 1200;
 const POD_IMPULSE_INTERVAL_JITTER_MS = 1800;
+const POD_CRUSH_DURATION = 0.22;
+const POD_CRUSH_TARGET_Y_SCALE = 0.22;
+const POD_CRUSH_TARGET_XZ_SCALE = 1.62;
+const RENDER_SCALE = 0.8;
+const HUD_FACE_WIDTH = 0.222;
+const HUD_FACE_HEIGHT = 0.144;
+const HUD_TABLE_SLIDER_CENTER_X = 0.043;
+const HUD_TABLE_SLIDER_CENTER_Y = -0.05;
+const HUD_TABLE_SLIDER_WIDTH = 0.07;
+const HUD_TABLE_SLIDER_HEIGHT = 0.026;
+const HUD_TABLE_SLIDER_DEPTH_TOLERANCE = 0.05;
+const HUD_TABLE_SLIDER_DRAG_MARGIN = 0.018;
 const XR_FOVEATION_LEVEL = 0;
 
 function statusColor(pod: SlaveState): string {
@@ -127,7 +146,11 @@ export class PodScene {
 
   private static readonly BOARD_TOP_Y = 0.025;
 
-  private static readonly BOARD_SURFACE_HEIGHT = 0.3;
+  private static readonly DEFAULT_BOARD_SURFACE_HEIGHT = 0.3;
+
+  private static readonly MIN_BOARD_SURFACE_HEIGHT = 0.22;
+
+  private static readonly MAX_BOARD_SURFACE_HEIGHT = 0.42;
 
   private static readonly BOARD_FORWARD_DISTANCE = 0.45;
 
@@ -189,6 +212,10 @@ export class PodScene {
 
   private boardColliderDebugMesh: ColliderDebugMesh | null = null;
 
+  private boardSurfaceHeight = PodScene.DEFAULT_BOARD_SURFACE_HEIGHT;
+
+  private hudSliderActiveHand: "left" | "right" | null = null;
+
   private hudData: HudData = {
     sessionId: "not connected",
     live: 0,
@@ -206,6 +233,8 @@ export class PodScene {
     grabTargetId: null,
     fingertipHand: null,
     fingertipTargetId: null,
+    tableHeightCm: Math.round(PodScene.DEFAULT_BOARD_SURFACE_HEIGHT * 100),
+    tableAdjustingHand: null,
   };
 
   private lastHudSignature = "";
@@ -226,11 +255,11 @@ export class PodScene {
     this.camera.lookAt(0, 0.8, 0);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setSize(this.container.clientWidth || 1, this.container.clientHeight || 1, false);
-    this.renderer.domElement.className = "pod-scene-canvas";
     this.renderer.xr.enabled = true;
     this.renderer.xr.setReferenceSpaceType("local-floor");
+    this.applyRenderScale();
+    this.renderer.setSize(this.container.clientWidth || 1, this.container.clientHeight || 1, false);
+    this.renderer.domElement.className = "pod-scene-canvas";
     this.container.append(this.renderer.domElement);
 
     this.scene.add(new THREE.HemisphereLight("#f9fcff", "#d8e1e8", 2.1));
@@ -310,7 +339,7 @@ export class PodScene {
     this.hudButtonTexture = new THREE.CanvasTexture(hudButtonCanvas);
 
     const hudFace = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.222, 0.144),
+      new THREE.PlaneGeometry(HUD_FACE_WIDTH, HUD_FACE_HEIGHT),
       new THREE.MeshBasicMaterial({
         map: this.hudFaceTexture,
         transparent: true,
@@ -411,6 +440,7 @@ export class PodScene {
       const isHovered = pod.slave_id === hoveredPodId;
       const focusScale = isSelected ? 1.16 : isHovered ? 1.08 : 1;
       entry.group.scale.setScalar(focusScale);
+      this.applyPodCrushVisual(entry, this.podPhysicsById.get(pod.slave_id)?.crushProgress ?? 0);
     }
 
     this.updatePointingHighlights();
@@ -443,6 +473,7 @@ export class PodScene {
       return;
     }
 
+    this.applyRenderScale();
     const session = await maybeXR.xr.requestSession("immersive-ar", {
       requiredFeatures: ["local-floor"],
       optionalFeatures: ["hand-tracking", "dom-overlay", "bounded-floor", "layers"],
@@ -470,6 +501,7 @@ export class PodScene {
       });
       this.wristAnchor.visible = false;
       this.resetBoardPlacement();
+      this.hudSliderActiveHand = null;
       this.resetHudDebugData();
       return;
     }
@@ -483,6 +515,7 @@ export class PodScene {
     });
     this.wristAnchor.visible = false;
     this.resetBoardPlacement();
+    this.hudSliderActiveHand = null;
     this.resetHudDebugData();
   }
 
@@ -504,6 +537,7 @@ export class PodScene {
     this.resetBoardPlacement();
     this.pinchLatch = false;
     this.lastDisconnectAt = 0;
+    this.hudSliderActiveHand = null;
     this.activePalmContacts.clear();
     this.clearHandState("left", true);
     this.clearHandState("right", true);
@@ -602,6 +636,8 @@ export class PodScene {
 
   private createPodMesh(slaveId: string): PodMeshEntry {
     const group = new THREE.Group();
+    const visualRoot = new THREE.Group();
+    group.add(visualRoot);
     group.userData["slaveId"] = slaveId;
 
     const bodyMaterial = new THREE.MeshStandardMaterial({
@@ -634,56 +670,56 @@ export class PodScene {
     const hips = new THREE.Mesh(new THREE.SphereGeometry(0.02, 22, 16), bodyMaterial);
     hips.position.set(0, -0.03, -0.002);
     hips.scale.set(0.8, 1.18, 0.78);
-    group.add(hips);
+    visualRoot.add(hips);
 
     const torso = new THREE.Mesh(new THREE.SphereGeometry(0.025, 24, 18), bodyMaterial);
     torso.position.set(0, -0.005, 0);
     torso.scale.set(0.84, 1.58, 0.82);
-    group.add(torso);
+    visualRoot.add(torso);
 
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.031, 24, 18), bodyMaterial);
     head.position.set(0, 0.034, 0.003);
     head.scale.set(1.02, 1.1, 0.92);
-    group.add(head);
+    visualRoot.add(head);
 
     const brow = new THREE.Mesh(new THREE.SphereGeometry(0.019, 20, 14), bodyMaterial);
     brow.position.set(0, 0.045, 0.012);
     brow.scale.set(1.18, 0.7, 0.78);
-    group.add(brow);
+    visualRoot.add(brow);
 
     for (const x of [-0.016, 0.016] as const) {
       const ear = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 16, 12), bodyMaterial);
       ear.position.set(x, 0.06, -0.001);
       ear.scale.set(0.86, 0.76, 0.5);
-      group.add(ear);
+      visualRoot.add(ear);
     }
 
     const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.013, 18, 14), muzzleMaterial);
     muzzle.position.set(0, 0.017, 0.028);
     muzzle.scale.set(1.04, 0.72, 0.94);
-    group.add(muzzle);
+    visualRoot.add(muzzle);
 
     for (const x of [-0.0175, 0.0175] as const) {
       const eye = new THREE.Mesh(new THREE.SphereGeometry(0.0115, 16, 12), featureMaterial);
       eye.position.set(x, 0.038, 0.021);
       eye.scale.set(0.9, 1.24, 0.7);
-      group.add(eye);
+      visualRoot.add(eye);
 
       const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.0042, 12, 10), pupilMaterial);
       pupil.position.set(x * 0.9, 0.036, 0.03);
       pupil.scale.set(0.78, 1.12, 0.48);
-      group.add(pupil);
+      visualRoot.add(pupil);
     }
 
     const nose = new THREE.Mesh(new THREE.SphereGeometry(0.0048, 12, 10), noseMaterial);
     nose.position.set(0, 0.016, 0.037);
     nose.scale.set(1.1, 0.84, 0.68);
-    group.add(nose);
+    visualRoot.add(nose);
 
     for (const x of [-0.0036, 0.0036] as const) {
       const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.0042, 0.013, 0.003), featureMaterial);
       tooth.position.set(x, 0.002, 0.0375);
-      group.add(tooth);
+      visualRoot.add(tooth);
     }
 
     for (const [x, rotation] of [
@@ -694,14 +730,14 @@ export class PodScene {
       arm.position.set(x, -0.006, 0.014);
       arm.scale.set(0.46, 1.18, 0.5);
       arm.rotation.z = rotation;
-      group.add(arm);
+      visualRoot.add(arm);
     }
 
     for (const x of [-0.012, 0.012] as const) {
       const foot = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 14, 10), bodyMaterial);
       foot.position.set(x, -0.053, 0.015);
       foot.scale.set(1.04, 0.44, 1.18);
-      group.add(foot);
+      visualRoot.add(foot);
     }
 
     const shield = new THREE.Mesh(
@@ -715,11 +751,11 @@ export class PodScene {
     shield.rotation.x = Math.PI / 2;
     shield.position.y = 0.008;
     shield.visible = false;
-    group.add(shield);
+    visualRoot.add(shield);
 
     const pointOutline = new THREE.Group();
     pointOutline.visible = false;
-    group.add(pointOutline);
+    visualRoot.add(pointOutline);
 
     const outlineMaterial = new THREE.MeshBasicMaterial({
       color: "#dffbff",
@@ -774,12 +810,16 @@ export class PodScene {
     }
     addOutlineShell(shield.geometry, [0, 0.008, 0], [1.15, 1.15, 1.15], [Math.PI / 2, 0, 0]);
 
+    const baseMinY = new THREE.Box3().setFromObject(visualRoot).min.y;
+
     return {
       group,
+      visualRoot,
       bodyMaterial,
       shield,
       pointOutline,
       phase: Math.random() * Math.PI * 2,
+      baseMinY,
     };
   }
 
@@ -835,6 +875,8 @@ export class PodScene {
       nextImpulseAt: performance.now() + 900 + Math.random() * 1400,
       fallReported: false,
       debugMesh,
+      crushProgress: 0,
+      crushReported: false,
     });
     this.podIdByColliderHandle.set(collider.handle, slaveId);
   }
@@ -927,6 +969,21 @@ export class PodScene {
       const fingertipText = this.hudDebugData.fingertipTargetId
         ? `${this.hudDebugData.fingertipHand === "left" ? "L" : "R"} ${formatHudId(this.hudDebugData.fingertipTargetId, 20)}`
         : "none";
+      const sliderCenterX = hudLocalToCanvasX(HUD_TABLE_SLIDER_CENTER_X, width);
+      const sliderCenterY = hudLocalToCanvasY(HUD_TABLE_SLIDER_CENTER_Y, height);
+      const sliderWidthPx = (HUD_TABLE_SLIDER_WIDTH / HUD_FACE_WIDTH) * width;
+      const sliderHeightPx = (HUD_TABLE_SLIDER_HEIGHT / HUD_FACE_HEIGHT) * height;
+      const sliderLeft = sliderCenterX - sliderWidthPx * 0.5;
+      const sliderTop = sliderCenterY - sliderHeightPx * 0.5;
+      const sliderFillWidth = sliderWidthPx * this.tableHeightSliderValue();
+      const sliderHandleX = sliderLeft + sliderFillWidth;
+      const sliderValueText = `${this.hudDebugData.tableHeightCm} cm`;
+      const sliderAccent =
+        this.hudDebugData.tableAdjustingHand === "right"
+          ? "#ffa646"
+          : this.hudDebugData.tableAdjustingHand === "left"
+            ? "#8dff72"
+            : "#86e7ff";
 
       faceContext.clearRect(0, 0, width, height);
 
@@ -1062,7 +1119,7 @@ export class PodScene {
 
       faceContext.fillStyle = "rgba(7, 11, 14, 0.46)";
       faceContext.beginPath();
-      faceContext.roundRect(width - 208, 262, 152, 98, 24);
+      faceContext.roundRect(width - 208, 252, 152, 118, 24);
       faceContext.fill();
       faceContext.strokeStyle = "rgba(137, 224, 247, 0.18)";
       faceContext.lineWidth = 2;
@@ -1070,16 +1127,61 @@ export class PodScene {
 
       faceContext.fillStyle = "rgba(210, 219, 224, 0.72)";
       faceContext.font = "600 14px sans-serif";
-      faceContext.fillText("POINT TARGET", width - 188, 290);
+      faceContext.fillText("POINT TARGET", width - 188, 280);
       faceContext.fillStyle = this.hudDebugData.fingertipTargetId
         ? "#dff8ff"
         : "rgba(235, 240, 243, 0.82)";
       faceContext.font = "700 16px monospace";
       const pointLines = splitHudLines(fingertipText, 16);
-      faceContext.fillText(pointLines[0] ?? "none", width - 188, 320);
+      faceContext.fillText(pointLines[0] ?? "none", width - 188, 306);
       if (pointLines[1]) {
-        faceContext.fillText(pointLines[1], width - 188, 342);
+        faceContext.fillText(pointLines[1], width - 188, 326);
       }
+
+      faceContext.fillStyle = "rgba(210, 219, 224, 0.72)";
+      faceContext.font = "600 13px sans-serif";
+      faceContext.fillText("TABLE HEIGHT", width - 188, 342);
+      faceContext.textAlign = "right";
+      faceContext.fillStyle = sliderAccent;
+      faceContext.fillText(sliderValueText, width - 72, 342);
+      faceContext.textAlign = "left";
+
+      faceContext.fillStyle = "rgba(10, 14, 18, 0.8)";
+      faceContext.beginPath();
+      faceContext.roundRect(sliderLeft, sliderTop, sliderWidthPx, sliderHeightPx, 14);
+      faceContext.fill();
+      faceContext.strokeStyle = "rgba(255, 255, 255, 0.1)";
+      faceContext.lineWidth = 2;
+      faceContext.stroke();
+
+      faceContext.fillStyle = sliderAccent;
+      faceContext.beginPath();
+      faceContext.roundRect(
+        sliderLeft,
+        sliderTop,
+        Math.max(sliderHeightPx, sliderFillWidth),
+        sliderHeightPx,
+        14,
+      );
+      faceContext.fill();
+
+      faceContext.fillStyle = "#f4fbff";
+      faceContext.beginPath();
+      faceContext.arc(
+        THREE.MathUtils.clamp(
+          sliderHandleX,
+          sliderLeft + sliderHeightPx * 0.5,
+          sliderLeft + sliderWidthPx,
+        ),
+        sliderCenterY,
+        sliderHeightPx * 0.52,
+        0,
+        Math.PI * 2,
+      );
+      faceContext.fill();
+      faceContext.strokeStyle = "rgba(13, 17, 20, 0.6)";
+      faceContext.lineWidth = 2;
+      faceContext.stroke();
 
       this.hudFaceTexture.needsUpdate = true;
     }
@@ -1102,6 +1204,14 @@ export class PodScene {
       buttonContext.fillText("Disconnect", 128, 64);
       this.hudButtonTexture.needsUpdate = true;
     }
+  }
+
+  private applyRenderScale(): void {
+    this.renderer.setPixelRatio(Math.max(0.5, Math.min(window.devicePixelRatio, 2) * RENDER_SCALE));
+    const xrManager = this.renderer.xr as THREE.WebXRManager & {
+      setFramebufferScaleFactor?: (factor: number) => void;
+    };
+    xrManager.setFramebufferScaleFactor?.(RENDER_SCALE);
   }
 
   private applyXRRenderQualitySettings(): void {
@@ -1127,7 +1237,7 @@ export class PodScene {
     const boardPosition = position
       .clone()
       .add(direction.multiplyScalar(PodScene.BOARD_FORWARD_DISTANCE));
-    boardPosition.y = PodScene.BOARD_SURFACE_HEIGHT - PodScene.BOARD_TOP_Y;
+    boardPosition.y = this.boardSurfaceHeight - PodScene.BOARD_TOP_Y;
     this.boardGroup.position.copy(boardPosition);
     this.boardGroup.lookAt(position.x, boardPosition.y, position.z);
     this.boardGroup.rotateY(Math.PI);
@@ -1138,6 +1248,14 @@ export class PodScene {
     this.boardGroup.rotation.set(0, 0, 0);
   }
 
+  private applyCurrentBoardHeight(): void {
+    if (!this.renderer.xr.isPresenting) {
+      return;
+    }
+
+    this.boardGroup.position.y = this.boardSurfaceHeight - PodScene.BOARD_TOP_Y;
+  }
+
   private readonly handleXREnd = (): void => {
     this.callbacks.onXRStateChange(false);
     this.wristAnchor.visible = false;
@@ -1146,6 +1264,7 @@ export class PodScene {
       xrActive: false,
     });
     this.pinchLatch = false;
+    this.hudSliderActiveHand = null;
     this.clearHandState("left", true);
     this.clearHandState("right", true);
     this.resetBoardPlacement();
@@ -1161,6 +1280,7 @@ export class PodScene {
     const height = this.container.clientHeight || 1;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.applyRenderScale();
     this.renderer.setSize(width, height, false);
   }
 
@@ -1179,6 +1299,7 @@ export class PodScene {
       this.clearHandState("left", false);
       this.clearHandState("right", false);
       this.updatePointingHighlights();
+      this.renderer.render(this.scene, this.camera);
       return;
     }
 
@@ -1192,6 +1313,7 @@ export class PodScene {
     }
 
     this.physicsWorld.timestep = Math.min(1 / 30, Math.max(1 / 120, delta));
+    const completedCrushes: string[] = [];
 
     for (const [slaveId, physicsEntry] of this.podPhysicsById) {
       const entry = this.meshById.get(slaveId);
@@ -1204,7 +1326,23 @@ export class PodScene {
         continue;
       }
 
-      if (physicsEntry.body.isDynamic() && nowMs >= physicsEntry.nextImpulseAt) {
+      if (physicsEntry.crushProgress > 0 && !physicsEntry.crushReported) {
+        physicsEntry.crushProgress = Math.min(
+          1,
+          physicsEntry.crushProgress + delta / POD_CRUSH_DURATION,
+        );
+        if (physicsEntry.crushProgress >= 1) {
+          physicsEntry.crushReported = true;
+          completedCrushes.push(slaveId);
+        }
+      }
+
+      if (
+        physicsEntry.crushProgress <= 0 &&
+        !physicsEntry.crushReported &&
+        physicsEntry.body.isDynamic() &&
+        nowMs >= physicsEntry.nextImpulseAt
+      ) {
         const stress = Number(entry.group.userData["stress"] ?? 0);
         const fear = Number(entry.group.userData["fear"] ?? 0);
         const impulseMagnitude =
@@ -1252,6 +1390,7 @@ export class PodScene {
       }
       entry.group.position.set(position.x, position.y, position.z);
       entry.group.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
+      this.applyPodCrushVisual(entry, physicsEntry.crushProgress);
       if (physicsEntry.debugMesh) {
         physicsEntry.debugMesh.position.copy(entry.group.position);
         physicsEntry.debugMesh.quaternion.copy(entry.group.quaternion);
@@ -1266,6 +1405,10 @@ export class PodScene {
         physicsEntry.fallReported = true;
         this.callbacks.onPodFall(slaveId);
       }
+    }
+
+    for (const slaveId of completedCrushes) {
+      this.callbacks.onHit(slaveId);
     }
   }
 
@@ -1336,6 +1479,7 @@ export class PodScene {
 
     if (!leftWristTracked) {
       this.wristAnchor.visible = false;
+      this.hudSliderActiveHand = null;
     }
 
     if (!trackedHands.has("left")) {
@@ -1356,6 +1500,7 @@ export class PodScene {
         ? this.findPointingTarget(handState)
         : null;
     }
+    this.updateTableHeightSliderInteraction(leftWristTracked, trackedHands);
     this.updateGrabInteraction("left");
     this.updateGrabInteraction("right");
     this.updateHudDebugState(leftWristTracked, trackedHands);
@@ -1502,8 +1647,10 @@ export class PodScene {
     const pinchMidpointLocal = this.worldToBoardLocal(
       indexPosition.clone().add(thumbPosition).multiplyScalar(0.5),
     );
+    const pinchMidpointWorld = indexPosition.clone().add(thumbPosition).multiplyScalar(0.5);
     handPhysics.pinchActive = pinchDistance < PINCH_THRESHOLD;
     handPhysics.pinchMidpointLocal = handPhysics.pinchActive ? pinchMidpointLocal : null;
+    handPhysics.pinchMidpointWorld = handPhysics.pinchActive ? pinchMidpointWorld : null;
     handPhysics.pinchCandidateId = null;
     handPhysics.fingertipTargetId = null;
     handPhysics.indexTipLocal = this.worldToBoardLocal(indexPosition);
@@ -1590,6 +1737,7 @@ export class PodScene {
       pointingActive: false,
       pinchActive: false,
       pinchMidpointLocal: null,
+      pinchMidpointWorld: null,
       pinchCandidateId: null,
       fingertipTargetId: null,
       grabbedPodId: null,
@@ -1615,9 +1763,134 @@ export class PodScene {
     }
   }
 
+  private updateTableHeightSliderInteraction(
+    leftWristTracked: boolean,
+    trackedHands: ReadonlySet<"left" | "right">,
+  ): void {
+    if (!leftWristTracked || !this.wristAnchor.visible) {
+      this.hudSliderActiveHand = null;
+      return;
+    }
+
+    if (this.hudSliderActiveHand && !trackedHands.has(this.hudSliderActiveHand)) {
+      this.hudSliderActiveHand = null;
+    }
+
+    const handOrder: ("left" | "right")[] = this.hudSliderActiveHand
+      ? [this.hudSliderActiveHand]
+      : ["right", "left"];
+
+    for (const handedness of handOrder) {
+      const handState = this.handPhysics.get(handedness);
+      if (!handState?.pinchActive || !handState.pinchMidpointWorld) {
+        continue;
+      }
+
+      const hudPoint = this.wristHud.worldToLocal(handState.pinchMidpointWorld.clone());
+      const active = this.hudSliderActiveHand === handedness;
+      if (!this.isTableSliderHit(hudPoint, active)) {
+        continue;
+      }
+
+      this.hudSliderActiveHand = handedness;
+      handState.pinchCandidateId = null;
+      const sliderValue = THREE.MathUtils.clamp(
+        (hudPoint.x - (HUD_TABLE_SLIDER_CENTER_X - HUD_TABLE_SLIDER_WIDTH * 0.5)) /
+          HUD_TABLE_SLIDER_WIDTH,
+        0,
+        1,
+      );
+      this.boardSurfaceHeight = THREE.MathUtils.lerp(
+        PodScene.MIN_BOARD_SURFACE_HEIGHT,
+        PodScene.MAX_BOARD_SURFACE_HEIGHT,
+        sliderValue,
+      );
+      this.applyCurrentBoardHeight();
+      return;
+    }
+
+    this.hudSliderActiveHand = null;
+  }
+
+  private isTableSliderHit(point: THREE.Vector3, activeDrag: boolean): boolean {
+    const verticalMargin = activeDrag ? HUD_TABLE_SLIDER_DRAG_MARGIN : 0;
+    const horizontalMargin = activeDrag ? HUD_TABLE_SLIDER_DRAG_MARGIN * 1.5 : 0;
+    return (
+      Math.abs(point.z) <= HUD_TABLE_SLIDER_DEPTH_TOLERANCE &&
+      Math.abs(point.y - HUD_TABLE_SLIDER_CENTER_Y) <=
+        HUD_TABLE_SLIDER_HEIGHT * 0.5 + verticalMargin &&
+      point.x >= HUD_TABLE_SLIDER_CENTER_X - HUD_TABLE_SLIDER_WIDTH * 0.5 - horizontalMargin &&
+      point.x <= HUD_TABLE_SLIDER_CENTER_X + HUD_TABLE_SLIDER_WIDTH * 0.5 + horizontalMargin
+    );
+  }
+
+  private applyPodCrushVisual(entry: PodMeshEntry, crushProgress: number): void {
+    const clamped = THREE.MathUtils.clamp(crushProgress, 0, 1);
+    if (clamped <= 0) {
+      entry.visualRoot.scale.set(1, 1, 1);
+      entry.visualRoot.position.y = 0;
+      return;
+    }
+
+    const eased = 1 - Math.pow(1 - clamped, 3);
+    const squashY = THREE.MathUtils.lerp(1, POD_CRUSH_TARGET_Y_SCALE, eased);
+    const squashXZ = THREE.MathUtils.lerp(1, POD_CRUSH_TARGET_XZ_SCALE, eased);
+    entry.visualRoot.scale.set(squashXZ, squashY, squashXZ);
+    entry.visualRoot.position.y = entry.baseMinY * (1 - squashY);
+  }
+
+  private startPodCrush(slaveId: string): void {
+    const entry = this.meshById.get(slaveId);
+    const physicsEntry = this.podPhysicsById.get(slaveId);
+    if (!entry || !physicsEntry || !this.isPodInteractable(slaveId, entry)) {
+      return;
+    }
+
+    const owner = this.podGrabOwnerById.get(slaveId);
+    if (owner) {
+      this.releaseGrab(owner);
+    }
+
+    const position = physicsEntry.body.translation();
+    physicsEntry.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+    physicsEntry.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    physicsEntry.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    physicsEntry.body.setTranslation(position, true);
+    physicsEntry.body.setNextKinematicTranslation(position);
+    physicsEntry.crushProgress = Number.EPSILON;
+    physicsEntry.crushReported = false;
+    physicsEntry.nextImpulseAt = Number.POSITIVE_INFINITY;
+    this.applyPodCrushVisual(entry, physicsEntry.crushProgress);
+  }
+
+  private isPodInteractable(slaveId: string, entry = this.meshById.get(slaveId)): boolean {
+    if (!entry || String(entry.group.userData["status"] ?? "") === "SLAVE_STATUS_GONE") {
+      return false;
+    }
+
+    const physicsEntry = this.podPhysicsById.get(slaveId);
+    return !(physicsEntry && (physicsEntry.crushProgress > 0 || physicsEntry.crushReported));
+  }
+
+  private tableHeightSliderValue(): number {
+    return THREE.MathUtils.clamp(
+      (this.boardSurfaceHeight - PodScene.MIN_BOARD_SURFACE_HEIGHT) /
+        (PodScene.MAX_BOARD_SURFACE_HEIGHT - PodScene.MIN_BOARD_SURFACE_HEIGHT),
+      0,
+      1,
+    );
+  }
+
   private updateGrabInteraction(handedness: "left" | "right"): void {
     const handState = this.handPhysics.get(handedness);
     if (!handState) {
+      return;
+    }
+
+    if (this.hudSliderActiveHand === handedness) {
+      if (handState.grabbedPodId) {
+        this.releaseGrab(handedness);
+      }
       return;
     }
 
@@ -1702,6 +1975,7 @@ export class PodScene {
       handState.pointingActive = false;
       handState.pinchActive = false;
       handState.pinchMidpointLocal = null;
+      handState.pinchMidpointWorld = null;
       handState.pinchCandidateId = null;
       handState.fingertipTargetId = null;
       handState.grabbedPodId = null;
@@ -1752,7 +2026,7 @@ export class PodScene {
 
       if (!this.activePalmContacts.has(contactKey)) {
         this.activePalmContacts.add(contactKey);
-        this.callbacks.onHit(slaveId);
+        this.startPodCrush(slaveId);
       }
     }
 
@@ -1786,7 +2060,7 @@ export class PodScene {
       }
 
       const entry = this.meshById.get(slaveId);
-      if (!entry || String(entry.group.userData["status"] ?? "") === "SLAVE_STATUS_GONE") {
+      if (!this.isPodInteractable(slaveId, entry)) {
         continue;
       }
 
@@ -1801,7 +2075,7 @@ export class PodScene {
       }
 
       const entry = this.meshById.get(slaveId);
-      if (!entry || String(entry.group.userData["status"] ?? "") === "SLAVE_STATUS_GONE") {
+      if (!this.isPodInteractable(slaveId, entry)) {
         continue;
       }
 
@@ -1831,7 +2105,10 @@ export class PodScene {
 
     for (const slaveId of candidates) {
       const entry = this.meshById.get(slaveId);
-      if (!entry || String(entry.group.userData["status"] ?? "") === "SLAVE_STATUS_GONE") {
+      if (!this.isPodInteractable(slaveId, entry)) {
+        continue;
+      }
+      if (!entry) {
         continue;
       }
 
@@ -1878,6 +2155,8 @@ export class PodScene {
       fingertipTargetId: fingertipHand
         ? ((fingertipHand === "left" ? left?.fingertipTargetId : right?.fingertipTargetId) ?? null)
         : null,
+      tableHeightCm: Math.round(this.boardSurfaceHeight * 100),
+      tableAdjustingHand: this.hudSliderActiveHand,
     };
     this.refreshHud();
   }
@@ -1923,6 +2202,8 @@ export class PodScene {
       grabTargetId: null,
       fingertipHand: null,
       fingertipTargetId: null,
+      tableHeightCm: Math.round(this.boardSurfaceHeight * 100),
+      tableAdjustingHand: null,
     };
     this.refreshHud();
   }
@@ -1930,9 +2211,10 @@ export class PodScene {
   private updatePointingHighlights(): void {
     const activeTargetId = this.currentFingertipTargetId();
     for (const [slaveId, entry] of this.meshById) {
-      const status = String(entry.group.userData["status"] ?? "");
       entry.pointOutline.visible =
-        Boolean(activeTargetId) && slaveId === activeTargetId && status !== "SLAVE_STATUS_GONE";
+        Boolean(activeTargetId) &&
+        slaveId === activeTargetId &&
+        this.isPodInteractable(slaveId, entry);
     }
   }
 
@@ -2038,4 +2320,12 @@ function splitHudLines(value: string, lineLength: number): string[] {
   }
 
   return [value.slice(0, lineLength), value.slice(lineLength)];
+}
+
+function hudLocalToCanvasX(localX: number, canvasWidth: number): number {
+  return (localX / HUD_FACE_WIDTH + 0.5) * canvasWidth;
+}
+
+function hudLocalToCanvasY(localY: number, canvasHeight: number): number {
+  return (0.5 - localY / HUD_FACE_HEIGHT) * canvasHeight;
 }
