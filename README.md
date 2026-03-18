@@ -1,6 +1,6 @@
 # ハックツハッカソン 〜メガロカップ〜
 ### 関連URL
-- Topa`z: いつか貼る
+- Topa`z: https://topaz.dev/projects/afb5ff1dbfb7d031e984
 - Doorkeeper: https://hackz-community.doorkeeper.jp/events/194352
 
 > [!NOTE]
@@ -9,8 +9,8 @@
 
 ## デプロイ
 (フロントエンドはCloudflare Accessでブロックされているためアクセスできません。)
-- Frontend: https://hackz-megalo.krz-tech.net
-- Backend: https://api.hackz-megalo.krz-tech.net
+- Frontend: https://megalo-cup.krz-tech.net
+- Backend: https://megalo-cup.krz-tech.net
 
 ## 総合テスト
 - `master-service` の HTTP / gRPC / WebSocket の連携確認は、事前に `docker compose up --build -d redis master-service controller-service slave-service` を実行してから `./scripts/test-master-service-integration.sh` を使います。
