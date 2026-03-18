@@ -10,6 +10,7 @@ variable "gcp_services" {
     "container.googleapis.com",           # Kubernetes Engine
     "compute.googleapis.com",             # Compute Engine (Required for default SA)
     "redis.googleapis.com",               # Memorystore for Redis
+    "servicenetworking.googleapis.com",   # Private Service Access
     "logging.googleapis.com",             # Logging
     "clouderrorreporting.googleapis.com", # Error Reporting
     "cloudbuild.googleapis.com",          # Cloud Build
