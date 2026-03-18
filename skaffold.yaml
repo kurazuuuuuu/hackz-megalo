@@ -46,7 +46,7 @@ profiles:
         hooks:
           before:
             - host:
-                command: ["sh", "-c", "kubectl create secret generic cloudflared-secret --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -"]
+                command: ["sh", "-c", "kubectl --context=orbstack create secret generic cloudflared-secret --from-env-file=.env --dry-run=client -o yaml | kubectl --context=orbstack apply -f -"]
     manifests:
       kustomize:
         paths:
