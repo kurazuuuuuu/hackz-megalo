@@ -95,6 +95,21 @@ resource "google_cloudbuild_trigger" "push_trigger" {
 
   build {
     step {
+      id         = "pull-cache-images"
+      name       = "gcr.io/cloud-builders/docker"
+      entrypoint = "bash"
+      args = [
+        "-c",
+        <<-EOT
+          for app in ${join(" ", local.apps)}; do
+            docker pull \
+              ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/$app:latest || true
+          done
+        EOT
+      ]
+    }
+
+    step {
       id         = "build-images"
       name       = "gcr.io/cloud-builders/docker"
       entrypoint = "bash"
@@ -102,19 +117,22 @@ resource "google_cloudbuild_trigger" "push_trigger" {
         "-c",
         <<-EOT
           for app in ${join(" ", local.apps)}; do
+            image=${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/$app
             if [ "$app" = "frontend-webxr" ]; then
               docker build \
                 -f apps/$app/Dockerfile \
+                --cache-from "$image:latest" \
                 --build-arg VITE_API_BASE_URL="$$VITE_API_BASE_URL" \
                 --build-arg VITE_WS_URL="$$VITE_WS_URL" \
-                -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/$app:$COMMIT_SHA \
-                -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/$app:latest \
+                -t $image:$COMMIT_SHA \
+                -t $image:latest \
                 .
             else
               docker build \
                 -f apps/$app/Dockerfile \
-                -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/$app:$COMMIT_SHA \
-                -t ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.hackz_megalo_repo.repository_id}/$app:latest \
+                --cache-from "$image:latest" \
+                -t $image:$COMMIT_SHA \
+                -t $image:latest \
                 .
             fi
           done

@@ -5,7 +5,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY apps ./apps
+COPY apps/controller-service ./apps/controller-service
 COPY libs ./libs
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/controller-service ./apps/controller-service/cmd/server
