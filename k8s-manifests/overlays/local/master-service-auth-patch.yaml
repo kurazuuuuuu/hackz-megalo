@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: master-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: master-service
+          env:
+            - name: MASTER_CLOUDFLARE_ACCESS_ENABLED
+              value: "true"
+            - name: MASTER_CLOUDFLARE_ACCESS_TEAM_DOMAIN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-secret
+                  key: CLOUDFLARE_ACCESS_TEAM_DOMAIN
+            - name: MASTER_CLOUDFLARE_ACCESS_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-secret
+                  key: CLOUDFLARE_ACCESS_AUDIENCE

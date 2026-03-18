@@ -3,6 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 )
 
 type RedisConfig struct {
@@ -12,8 +15,20 @@ type RedisConfig struct {
 }
 
 type MasterConfig struct {
-	HTTPAddr string
-	Redis    RedisConfig
+	HTTPAddr         string
+	Redis            RedisConfig
+	CloudflareAccess CloudflareAccessConfig
+}
+
+type CloudflareAccessConfig struct {
+	Enabled      bool
+	TeamDomain   string
+	Audience     string
+	CertsURL     string
+	TokenHeader  string
+	TokenCookie  string
+	JWKSCacheTTL time.Duration
+	HTTPTimeout  time.Duration
 }
 
 type ControllerConfig struct {
@@ -40,8 +55,24 @@ func LoadMaster() (MasterConfig, error) {
 			EventsChannel: envOrDefault("MASTER_REDIS_EVENTS_CHANNEL", "game.events"),
 			StatesChannel: envOrDefault("MASTER_REDIS_STATES_CHANNEL", "slave.states"),
 		},
+		CloudflareAccess: CloudflareAccessConfig{
+			Enabled:      envOrDefaultBool("MASTER_CLOUDFLARE_ACCESS_ENABLED", false),
+			TeamDomain:   strings.TrimSpace(envOrDefault("MASTER_CLOUDFLARE_ACCESS_TEAM_DOMAIN", "")),
+			Audience:     strings.TrimSpace(envOrDefault("MASTER_CLOUDFLARE_ACCESS_AUDIENCE", "")),
+			CertsURL:     strings.TrimSpace(envOrDefault("MASTER_CLOUDFLARE_ACCESS_CERTS_URL", "")),
+			TokenHeader:  envOrDefault("MASTER_CLOUDFLARE_ACCESS_TOKEN_HEADER", "Cf-Access-Jwt-Assertion"),
+			TokenCookie:  envOrDefault("MASTER_CLOUDFLARE_ACCESS_TOKEN_COOKIE", "CF_Authorization"),
+			JWKSCacheTTL: envOrDefaultDuration("MASTER_CLOUDFLARE_ACCESS_JWKS_CACHE_TTL", 5*time.Minute),
+			HTTPTimeout:  envOrDefaultDuration("MASTER_CLOUDFLARE_ACCESS_HTTP_TIMEOUT", 5*time.Second),
+		},
 	}
-	return cfg, validateRedis(cfg.Redis)
+	if err := validateRedis(cfg.Redis); err != nil {
+		return MasterConfig{}, err
+	}
+	if err := validateCloudflareAccess(cfg.CloudflareAccess); err != nil {
+		return MasterConfig{}, err
+	}
+	return cfg, nil
 }
 
 func LoadController() (ControllerConfig, error) {
@@ -116,6 +147,31 @@ func validateRedis(cfg RedisConfig) error {
 	return nil
 }
 
+func validateCloudflareAccess(cfg CloudflareAccessConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.TeamDomain == "" {
+		return fmt.Errorf("MASTER_CLOUDFLARE_ACCESS_TEAM_DOMAIN is required when MASTER_CLOUDFLARE_ACCESS_ENABLED=true")
+	}
+	if cfg.Audience == "" {
+		return fmt.Errorf("MASTER_CLOUDFLARE_ACCESS_AUDIENCE is required when MASTER_CLOUDFLARE_ACCESS_ENABLED=true")
+	}
+	if cfg.TokenHeader == "" {
+		return fmt.Errorf("MASTER_CLOUDFLARE_ACCESS_TOKEN_HEADER is required when MASTER_CLOUDFLARE_ACCESS_ENABLED=true")
+	}
+	if cfg.TokenCookie == "" {
+		return fmt.Errorf("MASTER_CLOUDFLARE_ACCESS_TOKEN_COOKIE is required when MASTER_CLOUDFLARE_ACCESS_ENABLED=true")
+	}
+	if cfg.JWKSCacheTTL <= 0 {
+		return fmt.Errorf("MASTER_CLOUDFLARE_ACCESS_JWKS_CACHE_TTL must be greater than zero")
+	}
+	if cfg.HTTPTimeout <= 0 {
+		return fmt.Errorf("MASTER_CLOUDFLARE_ACCESS_HTTP_TIMEOUT must be greater than zero")
+	}
+	return nil
+}
+
 func envOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -132,4 +188,28 @@ func envOrDefaultInt32(key string, defaultValue int32) int32 {
 		}
 	}
 	return defaultValue
+}
+
+func envOrDefaultBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func envOrDefaultDuration(key string, defaultValue time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
 }

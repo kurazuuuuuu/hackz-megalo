@@ -8,4 +8,6 @@ secrets = {
   "vite-api-base-url" = "your_api_url"
   "vite-ws-url" = "your_websocket_url"
   "cloudflared-token-secret" = ""
+  "cloudflare-access-team-domain-secret" = "https://your-team.cloudflareaccess.com"
+  "cloudflare-access-audience-secret" = "your-cloudflare-access-audience"
 }

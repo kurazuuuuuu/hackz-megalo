@@ -11,3 +11,4 @@ resources:
 patchesStrategicMerge:
   - nginx-proxy-lb-patch.yaml
   - backend-lb-patch.yaml
+  - master-service-auth-patch.yaml
