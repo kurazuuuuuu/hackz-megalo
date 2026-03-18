@@ -215,6 +215,15 @@ func main() {
 	}
 	go serverState.subscribeStateUpdates(ctx)
 
+	accessVerifier, err := newCloudflareAccessVerifier(cfg.CloudflareAccess)
+	if err != nil {
+		log.Fatalf("initialize cloudflare access auth: %v", err)
+	}
+
+	withAuth := func(handler http.Handler) http.Handler {
+		return withCloudflareAccessAuth(accessVerifier, handler)
+	}
+
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
@@ -224,13 +233,13 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/events", serverState.handlePublishEvent)
-	mux.HandleFunc("/internal/events", serverState.handlePublishEvent)
-	mux.HandleFunc("/internal/session", serverState.handleGetActiveSession)
-	mux.HandleFunc("/internal/session/metrics", serverState.handleGetActiveSessionMetrics)
-	mux.HandleFunc("/internal/slaves", serverState.handleListSlaveStates)
-	mux.HandleFunc("/internal/slaves/", serverState.handleGetSlaveState)
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/events", withAuth(http.HandlerFunc(serverState.handlePublishEvent)))
+	mux.Handle("/internal/events", withAuth(http.HandlerFunc(serverState.handlePublishEvent)))
+	mux.Handle("/internal/session", withAuth(http.HandlerFunc(serverState.handleGetActiveSession)))
+	mux.Handle("/internal/session/metrics", withAuth(http.HandlerFunc(serverState.handleGetActiveSessionMetrics)))
+	mux.Handle("/internal/slaves", withAuth(http.HandlerFunc(serverState.handleListSlaveStates)))
+	mux.Handle("/internal/slaves/", withAuth(http.HandlerFunc(serverState.handleGetSlaveState)))
+	mux.Handle("/ws", withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !serverState.tryReserveSessionSlot() {
 			http.Error(w, "active session already exists", http.StatusConflict)
 			return
@@ -294,7 +303,7 @@ func main() {
 				log.Printf("handle websocket client message: %v", err)
 			}
 		}
-	})
+	})))
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

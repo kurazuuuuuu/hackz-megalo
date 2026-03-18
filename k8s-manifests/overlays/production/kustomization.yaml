@@ -22,6 +22,10 @@ patches:
               key: REDIS_ADDR
   - target:
       kind: Deployment
+      name: master-service
+    path: master-service-auth-patch.yaml
+  - target:
+      kind: Deployment
       name: controller-service
     patch: |-
       - op: replace
