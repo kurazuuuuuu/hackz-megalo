@@ -18,29 +18,33 @@ if (!app) {
 
 app.innerHTML = `
   <div class="shell">
-    <section class="start-card" data-screen="start">
-      <p class="eyebrow">Hackz Megalo</p>
-      <h1>Pod たちの箱庭</h1>
-      <p class="lead">
-        先生は観察者です。まず新しいセッションを開始して WebSocket 接続を確立し、
-        接続完了後のメイン画面から WebXR モードを開始できます。
-      </p>
-      <div class="start-meta">
-        <span>Start で WebSocket 接続開始</span>
-        <span>接続完了後にメイン画面へ移動</span>
-        <span data-xr-badge>WebXR: checking</span>
+    <section class="start-screen" data-screen="start">
+      <div class="start-frame">
+        <div class="start-copy">
+          <p class="eyebrow">Hackz Megalo</p>
+          <h1>Pod Console</h1>
+        </div>
+        <div class="start-panel">
+          <div class="start-meta">
+            <span class="pill accent" data-xr-badge>WebXR: checking</span>
+            <p class="status-line" data-start-status>待機中です。</p>
+          </div>
+          <div class="start-actions">
+            <button class="start-button" type="button" data-start-session>Start Session</button>
+          </div>
+        </div>
       </div>
-      <div class="start-actions">
-        <button class="start-button" type="button" data-start-session>新しいセッションを開始</button>
-      </div>
-      <p class="status-line" data-start-status>待機中です。</p>
     </section>
 
     <section class="game-shell hidden" data-screen="game">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Session</p>
-          <h2 data-session-id>not connected</h2>
+        <div class="topbar-brand">
+          <p class="eyebrow">Hackz Megalo</p>
+          <h2>Pod Console</h2>
+        </div>
+        <div class="session-block">
+          <span class="session-label">session</span>
+          <strong data-session-id>not connected</strong>
         </div>
         <div class="status-pills">
           <span class="pill" data-connection-pill>待機中</span>
@@ -56,26 +60,31 @@ app.innerHTML = `
 
       <div class="layout">
         <section class="field-panel">
-          <div class="field-header">
+          <div class="panel-heading">
             <div>
-              <p class="eyebrow">Pod Field</p>
-              <h3>デスクトップは監視専用です。3D空間は WebXR で表示されます</h3>
+              <p class="eyebrow">Pods</p>
+              <h3 data-pod-count>0 live / 0 gone</h3>
             </div>
-            <div class="field-help">Desktop: monitor only / WebXR: hand tracking + Rapier collider</div>
           </div>
           <div class="scene-runtime-root" data-scene-root aria-hidden="true"></div>
+          <div class="pod-table-head" aria-hidden="true">
+            <span>Pod</span>
+            <span>Status</span>
+            <span>Stress</span>
+            <span>Fear</span>
+            <span>Turns</span>
+          </div>
           <div class="pod-strip" data-pod-strip></div>
         </section>
 
         <aside class="side-panel">
           <section class="panel-card">
-            <p class="eyebrow">Selected Pod</p>
-            <div data-selected-panel class="empty-panel">Pod を選ぶと詳細が見えます。</div>
-            <p class="selected-note">XR では手をパーにして POD に触れると Gone を通知します。</p>
+            <p class="eyebrow">Selected</p>
+            <div data-selected-panel class="empty-panel">No pod selected</div>
           </section>
 
           <section class="panel-card">
-            <p class="eyebrow">Activity</p>
+            <p class="eyebrow">Events</p>
             <ul class="activity-list" data-activity-list></ul>
           </section>
         </aside>
@@ -96,6 +105,7 @@ const connectionPill = requiredElement<HTMLElement>("[data-connection-pill]");
 const livePill = requiredElement<HTMLElement>("[data-live-pill]");
 const gonePill = requiredElement<HTMLElement>("[data-gone-pill]");
 const modePill = requiredElement<HTMLElement>("[data-mode-pill]");
+const podCount = requiredElement<HTMLElement>("[data-pod-count]");
 const selectedPanel = requiredElement<HTMLElement>("[data-selected-panel]");
 const podStrip = requiredElement<HTMLElement>("[data-pod-strip]");
 const activityList = requiredElement<HTMLUListElement>("[data-activity-list]");
@@ -111,13 +121,13 @@ const scene = new PodScene(sceneRoot, {
     store.setHoveredPod(slaveId);
   },
   onHit: (slaveId) => {
-    void reportPodGone("DEATH_REASON_USER_ACTION", slaveId, "押しつぶしました。");
+    void reportPodGone("DEATH_REASON_USER_ACTION", slaveId, "marked gone");
   },
   onDisconnect: () => {
-    void disconnectSession("WebXR セッションを終了しました。");
+    void disconnectSession("WebXR disconnected.");
   },
   onPodFall: (slaveId) => {
-    void reportPodGone("DEATH_REASON_POD_DOWN", slaveId, "机から落下しました。");
+    void reportPodGone("DEATH_REASON_POD_DOWN", slaveId, "fell from board");
   },
   onXRStateChange: (active) => {
     store.setXRActive(active);
@@ -137,7 +147,7 @@ enterXRButton.addEventListener("click", () => {
 });
 
 disconnectButton.addEventListener("click", () => {
-  void disconnectSession("セッションを切断しました。");
+  void disconnectSession("Session disconnected.");
 });
 
 window.addEventListener("beforeunload", () => {
@@ -151,9 +161,7 @@ store.subscribe((state) => {
   const pods = getPods(state);
   const selected = state.selectedPodId ? (state.podsById[state.selectedPodId] ?? null) : null;
   const counts = getEffectiveCounts(state);
-  const xrAvailableText = state.xrSupported
-    ? "WebXR: Quest Browser ready"
-    : "WebXR: desktop fallback";
+  const xrAvailableText = state.xrSupported ? "WebXR ready" : "Desktop only";
 
   xrBadge.textContent = xrAvailableText;
   startStatus.textContent = state.errorMessage ?? state.connectionMessage;
@@ -166,6 +174,7 @@ store.subscribe((state) => {
   livePill.textContent = `Live ${counts.live}`;
   gonePill.textContent = `Gone ${counts.gone}`;
   modePill.textContent = state.xrActive ? "WebXR" : "Monitor";
+  podCount.textContent = `${counts.live} live / ${counts.gone} gone`;
 
   startButton.disabled = state.phase === "connecting";
   enterXRButton.hidden = !state.xrSupported || state.xrActive || state.phase !== "playing";
@@ -182,11 +191,6 @@ store.subscribe((state) => {
     connection: state.connectionMessage,
     xrActive: state.xrActive,
   });
-});
-
-store.log({
-  kind: "system",
-  message: "先生、新しいセッションを開始すると監視画面から WebXR に入れます。",
 });
 
 async function probeXRSupport(): Promise<void> {
@@ -229,7 +233,7 @@ async function startSession(): Promise<void> {
     }
 
     store.patch({
-      connectionMessage: "初期スナップショット同期中...",
+      connectionMessage: "Initial sync...",
     });
     const snapshot = await waitForSessionSnapshot();
     if (attemptId !== connectionAttemptId) {
@@ -239,7 +243,7 @@ async function startSession(): Promise<void> {
     store.hydrateSnapshot(snapshot.session, snapshot.metrics, snapshot.states);
     store.log({
       kind: "system",
-      message: `セッション ${snapshot.session.session_id.slice(0, 8)} を開始しました。`,
+      message: `session ${snapshot.session.session_id.slice(0, 8)} started`,
     });
   } catch (error) {
     if (attemptId !== connectionAttemptId) {
@@ -255,8 +259,7 @@ async function startSession(): Promise<void> {
     const message = error instanceof Error ? error.message : "セッションを開始できませんでした。";
     store.patch({
       phase: "error",
-      errorMessage:
-        "セッション開始に失敗しました。別のプレイヤーが使用中か、バックエンドに接続できません。",
+      errorMessage: "セッション開始に失敗しました。",
       connectionMessage: message,
     });
   } finally {
@@ -278,7 +281,7 @@ async function enterXRMode(): Promise<void> {
     await scene.enterXR();
     store.log({
       kind: "system",
-      message: "WebXR モードを開始しました。左手首の HUD からいつでも切断できます。",
+      message: "webxr active",
     });
   } catch (error) {
     store.patch({
@@ -326,7 +329,7 @@ function openSocket(attemptId: number): Promise<WebSocket> {
 
         opened = true;
         socket = nextSocket;
-        store.patch({ connectionMessage: "WebSocket 接続済み" });
+        store.patch({ connectionMessage: "Connected" });
         resolve(nextSocket);
       },
       onMessage: (pod) => {
@@ -351,9 +354,9 @@ function openSocket(attemptId: number): Promise<WebSocket> {
 
         store.log({
           kind: "system",
-          message: "セッションが終了しました。もう一度「新しいセッションを開始」で入り直せます。",
+          message: "session closed",
         });
-        store.resetToDisconnected("セッション終了");
+        store.resetToDisconnected("Session ended");
         socket = null;
         startButton.disabled = false;
         scene.reset();
@@ -374,7 +377,7 @@ function openSocket(attemptId: number): Promise<WebSocket> {
         }
 
         store.patch({
-          connectionMessage: "接続に問題があります",
+          connectionMessage: "Connection issue",
         });
       },
     });
@@ -396,7 +399,7 @@ function prepareSessionInitialization(): void {
     actionInFlight: false,
     xrActive: false,
     xrEliminatedPodIds: [],
-    connectionMessage: "セッション初期化中...",
+    connectionMessage: "Starting session...",
   });
 }
 
@@ -432,7 +435,7 @@ function scheduleMetricsRefresh(): void {
 async function reportPodGone(
   deathReason: DeathReason,
   explicitSlaveId?: string,
-  messageSuffix = "Gone を通知しました。",
+  messageSuffix = "marked gone",
 ): Promise<void> {
   const state = store.getState();
   const targetId = explicitSlaveId ?? state.selectedPodId;
@@ -465,7 +468,7 @@ async function reportPodGone(
     });
     store.log({
       kind: "action",
-      message: `${pod.k8s_pod_name} を ${messageSuffix}`,
+      message: `${pod.k8s_pod_name} ${messageSuffix}`,
     });
     scheduleMetricsRefresh();
   } catch (error) {
@@ -480,29 +483,32 @@ async function reportPodGone(
 function renderSelectedPanel(pod: SlaveState | null): void {
   if (!pod) {
     selectedPanel.className = "empty-panel";
-    selectedPanel.innerHTML = "Pod を選ぶと詳細が見えます。";
+    selectedPanel.innerHTML = "No pod selected";
     return;
   }
 
   selectedPanel.className = "selected-panel";
   selectedPanel.innerHTML = `
-    <h4>${escapeHTML(pod.k8s_pod_name)}</h4>
-    <p class="selected-meta">${escapeHTML(pod.slave_id)}</p>
+    <div class="selected-header">
+      ${renderPodAvatarMarkup(pod)}
+      <div>
+        <h4>${escapeHTML(pod.k8s_pod_name)}</h4>
+        <p class="selected-meta">${escapeHTML(pod.slave_id)}</p>
+      </div>
+    </div>
+    <div class="selected-tags">
+      <span class="mini-pill ${statusToneClass(pod)}">${humanizeStatus(pod.status)}</span>
+      ${pod.firewall ? '<span class="mini-pill tone-accent">firewall</span>' : ""}
+      ${pod.infected ? '<span class="mini-pill tone-muted">infected</span>' : ""}
+    </div>
     <dl class="stat-grid">
-      <div><dt>Status</dt><dd>${humanizeStatus(pod.status)}</dd></div>
       <div><dt>Stress</dt><dd>${pod.stress}</dd></div>
       <div><dt>Fear</dt><dd>${pod.fear}</dd></div>
       <div><dt>Turns</dt><dd>${pod.turns_lived}</dd></div>
-      <div><dt>Remaining</dt><dd>${pod.remaining_turns}</dd></div>
+      <div><dt>Remain</dt><dd>${pod.remaining_turns}</dd></div>
       <div><dt>Reason</dt><dd>${humanizeDeathReason(pod.death_reason)}</dd></div>
+      <div><dt>Source</dt><dd>${escapeHTML(pod.source)}</dd></div>
     </dl>
-    <p class="selected-note">
-      ${
-        pod.status === "SLAVE_STATUS_GONE"
-          ? "この Pod は Gone 状態として同期済みです。"
-          : "XR では手をパーにして触れると Gone を通知できます。"
-      }
-    </p>
   `;
 }
 
@@ -523,9 +529,23 @@ function renderPodStrip(
     if (pod.slave_id === hoveredPodId) {
       button.classList.add("is-hovered");
     }
+    if (pod.status === "SLAVE_STATUS_GONE") {
+      button.classList.add("is-gone");
+    }
     button.innerHTML = `
-      <span>${escapeHTML(pod.k8s_pod_name)}</span>
-      <small>${humanizeStatus(pod.status)}</small>
+      <span class="pod-cell pod-cell-main">
+        ${renderPodAvatarMarkup(pod)}
+        <span class="pod-ident">
+          <strong>${escapeHTML(pod.k8s_pod_name)}</strong>
+          <small>${escapeHTML(shortId(pod.slave_id, 12))}</small>
+        </span>
+      </span>
+      <span class="pod-cell" data-label="Status">
+        <span class="status-badge ${statusToneClass(pod)}">${humanizeStatus(pod.status)}</span>
+      </span>
+      <span class="pod-cell" data-label="Stress"><strong>${pod.stress}</strong></span>
+      <span class="pod-cell" data-label="Fear"><strong>${pod.fear}</strong></span>
+      <span class="pod-cell" data-label="Turns"><strong>${pod.turns_lived}</strong></span>
     `;
     button.addEventListener("click", () => {
       store.setSelectedPod(pod.slave_id);
@@ -543,6 +563,14 @@ function renderPodStrip(
 function renderActivity(activity: ReturnType<GameStore["getState"]>["activity"]): void {
   activityList.innerHTML = "";
 
+  if (activity.length === 0) {
+    const item = document.createElement("li");
+    item.className = "activity-empty";
+    item.textContent = "No events";
+    activityList.append(item);
+    return;
+  }
+
   for (const entry of activity) {
     const item = document.createElement("li");
     item.className = `activity-item is-${entry.kind}`;
@@ -552,6 +580,49 @@ function renderActivity(activity: ReturnType<GameStore["getState"]>["activity"])
     `;
     activityList.append(item);
   }
+}
+
+function renderPodAvatarMarkup(pod: SlaveState): string {
+  const classes = [
+    "pod-avatar",
+    pod.status === "SLAVE_STATUS_GONE" ? "is-gone" : "",
+    pod.firewall ? "has-firewall" : "",
+    pod.infected ? "is-infected" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return `
+    <span class="${classes}" aria-hidden="true">
+      <span class="pod-ear left"></span>
+      <span class="pod-ear right"></span>
+      <span class="pod-eye left"><span class="pod-pupil"></span></span>
+      <span class="pod-eye right"><span class="pod-pupil"></span></span>
+      <span class="pod-nose"></span>
+      <span class="pod-tooth left"></span>
+      <span class="pod-tooth right"></span>
+    </span>
+  `;
+}
+
+function statusToneClass(pod: SlaveState): string {
+  if (pod.status === "SLAVE_STATUS_GONE") {
+    return "tone-gone";
+  }
+  if (pod.status === "SLAVE_STATUS_TERMINATING") {
+    return "tone-warn";
+  }
+  if (pod.infected) {
+    return "tone-muted";
+  }
+  if (pod.firewall) {
+    return "tone-accent";
+  }
+  return "tone-live";
+}
+
+function shortId(value: string, length = 8): string {
+  return value.length <= length ? value : value.slice(0, length);
 }
 
 function requiredElement<T extends Element>(selector: string): T {
@@ -565,7 +636,7 @@ function requiredElement<T extends Element>(selector: string): T {
 function humanizeStatus(status: SlaveState["status"]): string {
   switch (status) {
     case "SLAVE_STATUS_LIVE":
-      return "alive";
+      return "live";
     case "SLAVE_STATUS_TERMINATING":
       return "terminating";
     case "SLAVE_STATUS_GONE":
@@ -580,13 +651,13 @@ function humanizeDeathReason(reason: SlaveState["death_reason"]): string {
     case "DEATH_REASON_POD_DOWN":
       return "fell";
     case "DEATH_REASON_USER_ACTION":
-      return "crushed";
+      return "hand";
     case "DEATH_REASON_DISEASE":
       return "disease";
     case "DEATH_REASON_LIFESPAN":
       return "lifespan";
     case "DEATH_REASON_PROCESS_DOWN":
-      return "process down";
+      return "process";
     default:
       return "unspecified";
   }
