@@ -17,6 +17,7 @@ interface PodMeshEntry {
   group: THREE.Group;
   bodyMaterial: THREE.MeshStandardMaterial;
   shield: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  pointOutline: THREE.Group;
   phase: number;
 }
 
@@ -44,10 +45,13 @@ interface HandPhysicsState {
   indexDebugMesh: ColliderDebugMesh | null;
   middleDebugMesh: ColliderDebugMesh | null;
   openPalm: boolean;
+  pointingActive: boolean;
   pinchActive: boolean;
   pinchMidpointLocal: THREE.Vector3 | null;
   pinchCandidateId: string | null;
+  fingertipTargetId: string | null;
   grabbedPodId: string | null;
+  indexTipLocal: THREE.Vector3 | null;
   lastGrabPointLocal: THREE.Vector3 | null;
   lastGrabAt: number;
 }
@@ -58,6 +62,19 @@ interface HudData {
   gone: number;
   connection: string;
   xrActive: boolean;
+}
+
+type HandGesture = "TRACK LOST" | "IDLE" | "OPEN" | "POINT" | "PINCH" | "GRAB";
+
+interface HudDebugData {
+  leftTracked: boolean;
+  rightTracked: boolean;
+  leftGesture: HandGesture;
+  rightGesture: HandGesture;
+  pinchTargetId: string | null;
+  grabTargetId: string | null;
+  fingertipHand: "left" | "right" | null;
+  fingertipTargetId: string | null;
 }
 
 interface HandJointTracking {
@@ -85,6 +102,7 @@ const POD_IMPULSE_FEAR_FACTOR = 0.00001;
 const POD_IMPULSE_MAX = 0.0032;
 const POD_IMPULSE_INTERVAL_BASE_MS = 1200;
 const POD_IMPULSE_INTERVAL_JITTER_MS = 1800;
+const XR_FOVEATION_LEVEL = 0;
 
 function statusColor(pod: SlaveState): string {
   if (pod.status === "SLAVE_STATUS_GONE") {
@@ -179,6 +197,19 @@ export class PodScene {
     xrActive: false,
   };
 
+  private hudDebugData: HudDebugData = {
+    leftTracked: false,
+    rightTracked: false,
+    leftGesture: "TRACK LOST",
+    rightGesture: "TRACK LOST",
+    pinchTargetId: null,
+    grabTargetId: null,
+    fingertipHand: null,
+    fingertipTargetId: null,
+  };
+
+  private lastHudSignature = "";
+
   private lastFrameTime = performance.now();
 
   private pinchLatch = false;
@@ -269,8 +300,8 @@ export class PodScene {
     this.setupXRHands();
 
     const hudFaceCanvas = document.createElement("canvas");
-    hudFaceCanvas.width = 512;
-    hudFaceCanvas.height = 512;
+    hudFaceCanvas.width = 640;
+    hudFaceCanvas.height = 416;
     this.hudFaceTexture = new THREE.CanvasTexture(hudFaceCanvas);
 
     const hudButtonCanvas = document.createElement("canvas");
@@ -279,7 +310,7 @@ export class PodScene {
     this.hudButtonTexture = new THREE.CanvasTexture(hudButtonCanvas);
 
     const hudFace = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.16, 0.16),
+      new THREE.PlaneGeometry(0.222, 0.144),
       new THREE.MeshBasicMaterial({
         map: this.hudFaceTexture,
         transparent: true,
@@ -288,23 +319,23 @@ export class PodScene {
     this.wristHud.add(hudFace);
 
     this.hudButtonMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.12, 0.042),
+      new THREE.PlaneGeometry(0.132, 0.041),
       new THREE.MeshBasicMaterial({
         map: this.hudButtonTexture,
         transparent: true,
       }),
     );
-    this.hudButtonMesh.position.set(0, -0.07, 0.002);
+    this.hudButtonMesh.position.set(0, -0.085, 0.002);
     this.wristHud.add(this.hudButtonMesh);
 
     this.wristHud.rotation.x = -Math.PI / 2;
-    this.wristHud.position.set(0.028, 0.02, 0.028);
-    this.wristHud.scale.setScalar(0.88);
+    this.wristHud.position.set(0.036, 0.02, 0.028);
+    this.wristHud.scale.setScalar(0.94);
     this.wristAnchor.visible = false;
     this.wristAnchor.add(this.wristHud);
     this.scene.add(this.wristAnchor);
 
-    this.drawHud();
+    this.refreshHud();
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
@@ -381,11 +412,13 @@ export class PodScene {
       const focusScale = isSelected ? 1.16 : isHovered ? 1.08 : 1;
       entry.group.scale.setScalar(focusScale);
     }
+
+    this.updatePointingHighlights();
   }
 
   setHudData(data: HudData): void {
     this.hudData = data;
-    this.drawHud();
+    this.refreshHud();
   }
 
   async enterXR(): Promise<void> {
@@ -418,6 +451,7 @@ export class PodScene {
 
     session.addEventListener("end", this.handleXREnd);
     await this.renderer.xr.setSession(session);
+    this.applyXRRenderQualitySettings();
     this.placeBoardForXR();
     this.callbacks.onXRStateChange(true);
     this.setHudData({
@@ -436,6 +470,7 @@ export class PodScene {
       });
       this.wristAnchor.visible = false;
       this.resetBoardPlacement();
+      this.resetHudDebugData();
       return;
     }
 
@@ -448,6 +483,7 @@ export class PodScene {
     });
     this.wristAnchor.visible = false;
     this.resetBoardPlacement();
+    this.resetHudDebugData();
   }
 
   isXRPresenting(): boolean {
@@ -472,6 +508,7 @@ export class PodScene {
     this.clearHandState("left", true);
     this.clearHandState("right", true);
     this.podGrabOwnerById.clear();
+    this.resetHudDebugData();
   }
 
   dispose(): void {
@@ -680,10 +717,68 @@ export class PodScene {
     shield.visible = false;
     group.add(shield);
 
+    const pointOutline = new THREE.Group();
+    pointOutline.visible = false;
+    group.add(pointOutline);
+
+    const outlineMaterial = new THREE.MeshBasicMaterial({
+      color: "#dffbff",
+      transparent: true,
+      opacity: 0.92,
+      side: THREE.BackSide,
+      depthWrite: false,
+    });
+
+    const addOutlineShell = (
+      geometry: THREE.BufferGeometry,
+      position: readonly [number, number, number],
+      scale: readonly [number, number, number],
+      rotation?: readonly [number, number, number],
+    ): void => {
+      const shell = new THREE.Mesh(geometry, outlineMaterial);
+      shell.position.set(position[0], position[1], position[2]);
+      shell.scale.set(scale[0], scale[1], scale[2]);
+      if (rotation) {
+        shell.rotation.set(rotation[0], rotation[1], rotation[2]);
+      }
+      shell.renderOrder = 3;
+      pointOutline.add(shell);
+    };
+
+    addOutlineShell(hips.geometry, [0, -0.03, -0.002], [0.95, 1.33, 0.93]);
+    addOutlineShell(torso.geometry, [0, -0.005, 0], [0.99, 1.78, 0.97]);
+    addOutlineShell(head.geometry, [0, 0.034, 0.003], [1.18, 1.28, 1.06]);
+    addOutlineShell(brow.geometry, [0, 0.045, 0.012], [1.36, 0.86, 0.94]);
+    addOutlineShell(muzzle.geometry, [0, 0.017, 0.028], [1.2, 0.88, 1.1]);
+
+    for (const x of [-0.016, 0.016] as const) {
+      addOutlineShell(new THREE.SphereGeometry(0.0085, 16, 12), [x, 0.06, -0.001], [1, 0.88, 0.72]);
+    }
+    for (const [x, rotation] of [
+      [-0.023, 0.22],
+      [0.023, -0.22],
+    ] as const) {
+      addOutlineShell(
+        new THREE.SphereGeometry(0.007, 14, 10),
+        [x, -0.006, 0.014],
+        [0.58, 1.34, 0.62],
+        [0, 0, rotation],
+      );
+    }
+    for (const x of [-0.012, 0.012] as const) {
+      addOutlineShell(
+        new THREE.SphereGeometry(0.0085, 14, 10),
+        [x, -0.053, 0.015],
+        [1.2, 0.58, 1.34],
+      );
+    }
+    addOutlineShell(shield.geometry, [0, 0.008, 0], [1.15, 1.15, 1.15], [Math.PI / 2, 0, 0]);
+
     return {
       group,
       bodyMaterial,
       shield,
+      pointOutline,
       phase: Math.random() * Math.PI * 2,
     };
   }
@@ -818,28 +913,174 @@ export class PodScene {
     const faceCanvas = this.hudFaceTexture.image as HTMLCanvasElement;
     const faceContext = faceCanvas.getContext("2d");
     if (faceContext) {
-      faceContext.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
-      faceContext.fillStyle = "rgba(9, 18, 24, 0.88)";
+      const { width, height } = faceCanvas;
+      const sessionText = truncateText(this.hudData.sessionId, 22);
+      const connectionText = truncateText(this.hudData.connection, 24);
+      const trackText = `L ${this.hudDebugData.leftTracked ? "OK" : "--"} / R ${this.hudDebugData.rightTracked ? "OK" : "--"}`;
+      const gestureText = `L ${this.hudDebugData.leftGesture} / R ${this.hudDebugData.rightGesture}`;
+      const pinchText = this.hudDebugData.pinchTargetId
+        ? formatHudId(this.hudDebugData.pinchTargetId)
+        : "--";
+      const grabText = this.hudDebugData.grabTargetId
+        ? formatHudId(this.hudDebugData.grabTargetId)
+        : "--";
+      const fingertipText = this.hudDebugData.fingertipTargetId
+        ? `${this.hudDebugData.fingertipHand === "left" ? "L" : "R"} ${formatHudId(this.hudDebugData.fingertipTargetId, 20)}`
+        : "none";
+
+      faceContext.clearRect(0, 0, width, height);
+
+      const panelGradient = faceContext.createLinearGradient(0, 0, 0, height);
+      panelGradient.addColorStop(0, "rgba(20, 24, 28, 0.84)");
+      panelGradient.addColorStop(0.58, "rgba(9, 12, 15, 0.76)");
+      panelGradient.addColorStop(1, "rgba(6, 9, 12, 0.9)");
+      faceContext.fillStyle = panelGradient;
       faceContext.beginPath();
-      faceContext.roundRect(24, 24, 464, 464, 100);
+      faceContext.roundRect(18, 16, width - 36, height - 32, 48);
       faceContext.fill();
-      faceContext.strokeStyle = "rgba(166, 235, 255, 0.8)";
-      faceContext.lineWidth = 14;
+
+      faceContext.strokeStyle = "rgba(255, 255, 255, 0.14)";
+      faceContext.lineWidth = 2;
+      faceContext.beginPath();
+      faceContext.roundRect(19, 17, width - 38, height - 34, 47);
       faceContext.stroke();
+
+      const cyanGlow = faceContext.createRadialGradient(
+        width - 132,
+        150,
+        18,
+        width - 132,
+        150,
+        170,
+      );
+      cyanGlow.addColorStop(0, "rgba(132, 228, 255, 0.22)");
+      cyanGlow.addColorStop(0.6, "rgba(108, 208, 240, 0.08)");
+      cyanGlow.addColorStop(1, "rgba(108, 208, 240, 0)");
+      faceContext.fillStyle = cyanGlow;
+      faceContext.beginPath();
+      faceContext.roundRect(44, 36, width - 88, height - 72, 36);
+      faceContext.fill();
+
+      faceContext.save();
+      faceContext.globalAlpha = 0.22;
+      faceContext.fillStyle = "#86e7ff";
+      faceContext.beginPath();
+      faceContext.arc(width - 166, 112, 22, 0, Math.PI * 2);
+      faceContext.arc(width - 94, 112, 22, 0, Math.PI * 2);
+      faceContext.fill();
+      faceContext.beginPath();
+      faceContext.ellipse(width - 130, 195, 86, 104, 0, 0, Math.PI * 2);
+      faceContext.fill();
+      faceContext.globalAlpha = 0.16;
       faceContext.fillStyle = "#dff8ff";
-      faceContext.font = "bold 30px sans-serif";
-      faceContext.fillText("SESSION", 58, 92);
-      faceContext.font = "22px monospace";
-      faceContext.fillText(this.hudData.sessionId.slice(0, 12), 58, 128);
-      faceContext.font = "bold 66px sans-serif";
-      faceContext.fillText(String(this.hudData.live), 58, 248);
-      faceContext.font = "24px sans-serif";
-      faceContext.fillText("LIVE PODS", 58, 282);
-      faceContext.font = "bold 42px sans-serif";
-      faceContext.fillText(`Gone ${this.hudData.gone}`, 58, 350);
-      faceContext.font = "20px sans-serif";
-      faceContext.fillStyle = this.hudData.xrActive ? "#8bf2b5" : "#f7d28f";
-      faceContext.fillText(this.hudData.connection.slice(0, 22), 58, 410);
+      faceContext.beginPath();
+      faceContext.ellipse(width - 154, 180, 18, 28, 0.06, 0, Math.PI * 2);
+      faceContext.ellipse(width - 106, 180, 18, 28, -0.06, 0, Math.PI * 2);
+      faceContext.fill();
+      faceContext.globalAlpha = 0.18;
+      faceContext.strokeStyle = "#d9faff";
+      faceContext.lineWidth = 3;
+      faceContext.beginPath();
+      faceContext.moveTo(width - 132, 214);
+      faceContext.lineTo(width - 132, 232);
+      faceContext.moveTo(width - 120, 232);
+      faceContext.lineTo(width - 120, 250);
+      faceContext.moveTo(width - 144, 232);
+      faceContext.lineTo(width - 144, 250);
+      faceContext.stroke();
+      faceContext.restore();
+
+      faceContext.save();
+      faceContext.strokeStyle = "rgba(132, 228, 255, 0.12)";
+      faceContext.lineWidth = 1;
+      for (let x = 58; x < width - 58; x += 32) {
+        faceContext.beginPath();
+        faceContext.moveTo(x, 56);
+        faceContext.lineTo(x, height - 54);
+        faceContext.stroke();
+      }
+      for (let y = 56; y < height - 54; y += 28) {
+        faceContext.beginPath();
+        faceContext.moveTo(52, y);
+        faceContext.lineTo(width - 52, y);
+        faceContext.stroke();
+      }
+      faceContext.restore();
+
+      faceContext.fillStyle = "#f5f7f8";
+      faceContext.font = "600 18px sans-serif";
+      faceContext.fillText("LEFT WRIST DEBUG", 54, 60);
+      faceContext.font = "500 14px monospace";
+      faceContext.fillStyle = "rgba(227, 234, 238, 0.86)";
+      faceContext.fillText(sessionText, 54, 84);
+
+      faceContext.textAlign = "right";
+      faceContext.fillStyle = this.hudData.xrActive ? "#9ef0bc" : "#efcf93";
+      faceContext.font = "600 14px sans-serif";
+      faceContext.fillText(this.hudData.xrActive ? "XR ACTIVE" : "XR STANDBY", width - 56, 60);
+      faceContext.fillText(connectionText, width - 56, 84);
+      faceContext.textAlign = "left";
+
+      faceContext.fillStyle = "#ffffff";
+      faceContext.font = "700 60px sans-serif";
+      faceContext.fillText(String(this.hudData.live).padStart(2, "0"), 54, 170);
+      faceContext.fillStyle = "rgba(228, 236, 240, 0.86)";
+      faceContext.font = "600 16px sans-serif";
+      faceContext.fillText("LIVE PODS", 58, 196);
+
+      faceContext.fillStyle = "#c7d2d9";
+      faceContext.font = "700 34px sans-serif";
+      faceContext.fillText(String(this.hudData.gone).padStart(2, "0"), 54, 244);
+      faceContext.fillStyle = "rgba(200, 210, 218, 0.78)";
+      faceContext.font = "600 15px sans-serif";
+      faceContext.fillText("GONE", 58, 264);
+
+      faceContext.fillStyle = "rgba(7, 11, 14, 0.56)";
+      faceContext.beginPath();
+      faceContext.roundRect(44, 286, width - 88, 96, 28);
+      faceContext.fill();
+      faceContext.strokeStyle = "rgba(137, 224, 247, 0.22)";
+      faceContext.lineWidth = 2;
+      faceContext.stroke();
+
+      faceContext.font = "600 14px sans-serif";
+      faceContext.fillStyle = "rgba(217, 226, 232, 0.72)";
+      faceContext.fillText("TRACK", 58, 312);
+      faceContext.fillText("GESTURE", 58, 336);
+      faceContext.fillText("PINCH", 58, 360);
+      faceContext.fillText("GRAB", 318, 312);
+      faceContext.fillText("FINGERTIP", 318, 336);
+
+      faceContext.fillStyle = "#f3f7f9";
+      faceContext.font = "600 15px monospace";
+      faceContext.fillText(trackText, 128, 312);
+      faceContext.fillText(gestureText, 128, 336);
+      faceContext.fillText(pinchText, 128, 360);
+      faceContext.fillText(grabText, 392, 312);
+      faceContext.fillStyle = this.hudDebugData.fingertipTargetId ? "#a5edff" : "#f3f7f9";
+      faceContext.fillText(fingertipText, 392, 336);
+
+      faceContext.fillStyle = "rgba(7, 11, 14, 0.46)";
+      faceContext.beginPath();
+      faceContext.roundRect(width - 208, 262, 152, 98, 24);
+      faceContext.fill();
+      faceContext.strokeStyle = "rgba(137, 224, 247, 0.18)";
+      faceContext.lineWidth = 2;
+      faceContext.stroke();
+
+      faceContext.fillStyle = "rgba(210, 219, 224, 0.72)";
+      faceContext.font = "600 14px sans-serif";
+      faceContext.fillText("POINT TARGET", width - 188, 290);
+      faceContext.fillStyle = this.hudDebugData.fingertipTargetId
+        ? "#dff8ff"
+        : "rgba(235, 240, 243, 0.82)";
+      faceContext.font = "700 16px monospace";
+      const pointLines = splitHudLines(fingertipText, 16);
+      faceContext.fillText(pointLines[0] ?? "none", width - 188, 320);
+      if (pointLines[1]) {
+        faceContext.fillText(pointLines[1], width - 188, 342);
+      }
+
       this.hudFaceTexture.needsUpdate = true;
     }
 
@@ -847,20 +1088,27 @@ export class PodScene {
     const buttonContext = buttonCanvas.getContext("2d");
     if (buttonContext) {
       buttonContext.clearRect(0, 0, buttonCanvas.width, buttonCanvas.height);
-      buttonContext.fillStyle = "rgba(160, 37, 37, 0.94)";
+      buttonContext.fillStyle = "rgba(22, 18, 18, 0.84)";
       buttonContext.beginPath();
       buttonContext.roundRect(8, 8, 240, 112, 36);
       buttonContext.fill();
-      buttonContext.strokeStyle = "rgba(255, 225, 225, 0.9)";
-      buttonContext.lineWidth = 6;
+      buttonContext.strokeStyle = "rgba(255, 164, 164, 0.48)";
+      buttonContext.lineWidth = 4;
       buttonContext.stroke();
-      buttonContext.fillStyle = "#fff5f5";
-      buttonContext.font = "bold 28px sans-serif";
+      buttonContext.fillStyle = "#fff0f0";
+      buttonContext.font = "600 25px sans-serif";
       buttonContext.textAlign = "center";
       buttonContext.textBaseline = "middle";
       buttonContext.fillText("Disconnect", 128, 64);
       this.hudButtonTexture.needsUpdate = true;
     }
+  }
+
+  private applyXRRenderQualitySettings(): void {
+    const xrManager = this.renderer.xr as THREE.WebXRManager & {
+      setFoveation?: (foveation: number) => void;
+    };
+    xrManager.setFoveation?.(XR_FOVEATION_LEVEL);
   }
 
   private placeBoardForXR(): void {
@@ -901,6 +1149,7 @@ export class PodScene {
     this.clearHandState("left", true);
     this.clearHandState("right", true);
     this.resetBoardPlacement();
+    this.resetHudDebugData();
   };
 
   private resize(): void {
@@ -929,6 +1178,7 @@ export class PodScene {
       this.clearPalmContacts("right");
       this.clearHandState("left", false);
       this.clearHandState("right", false);
+      this.updatePointingHighlights();
       return;
     }
 
@@ -1029,6 +1279,7 @@ export class PodScene {
       this.wristAnchor.visible = false;
       this.clearHandState("left", true);
       this.clearHandState("right", true);
+      this.resetHudDebugData();
       return;
     }
 
@@ -1101,9 +1352,14 @@ export class PodScene {
       handState.pinchCandidateId = handState.pinchActive
         ? this.findPinchCandidate(handState)
         : null;
+      handState.fingertipTargetId = handState.pointingActive
+        ? this.findPointingTarget(handState)
+        : null;
     }
     this.updateGrabInteraction("left");
     this.updateGrabInteraction("right");
+    this.updateHudDebugState(leftWristTracked, trackedHands);
+    this.updatePointingHighlights();
 
     this.processOpenPalmContacts("left");
     this.processOpenPalmContacts("right");
@@ -1183,9 +1439,13 @@ export class PodScene {
     const pinkyPosition = jointPosition(pinkyTipPose, this.tmpMatrix);
     const thumbPosition = jointPosition(thumbTipPose, this.tmpMatrix);
 
-    const fingerTips = [indexPosition, middlePosition, ringPosition, pinkyPosition];
-    const fingersExtended = fingerTips.every((tip) => tip.distanceTo(wristPosition) > 0.09);
+    const indexExtended = indexPosition.distanceTo(wristPosition) > 0.09;
+    const middleExtended = middlePosition.distanceTo(wristPosition) > 0.085;
+    const ringExtended = ringPosition.distanceTo(wristPosition) > 0.08;
+    const pinkyExtended = pinkyPosition.distanceTo(wristPosition) > 0.078;
+    const fingersExtended = indexExtended && middleExtended && ringExtended && pinkyExtended;
     const thumbExtended = thumbPosition.distanceTo(wristPosition) > 0.07;
+    const pinchDistance = indexPosition.distanceTo(thumbPosition);
 
     const knuckles = [
       jointPosition(indexKnucklePose, this.tmpMatrix),
@@ -1211,6 +1471,12 @@ export class PodScene {
     }
 
     handPhysics.openPalm = fingersExtended && thumbExtended;
+    handPhysics.pointingActive =
+      indexExtended &&
+      !middleExtended &&
+      !ringExtended &&
+      !pinkyExtended &&
+      pinchDistance > PINCH_THRESHOLD * 1.4;
 
     this.setHandBodyPosition(
       handPhysics.palmBody,
@@ -1233,13 +1499,14 @@ export class PodScene {
       handPhysics.middleDebugMesh,
     );
 
-    const pinchDistance = indexPosition.distanceTo(thumbPosition);
     const pinchMidpointLocal = this.worldToBoardLocal(
       indexPosition.clone().add(thumbPosition).multiplyScalar(0.5),
     );
     handPhysics.pinchActive = pinchDistance < PINCH_THRESHOLD;
     handPhysics.pinchMidpointLocal = handPhysics.pinchActive ? pinchMidpointLocal : null;
     handPhysics.pinchCandidateId = null;
+    handPhysics.fingertipTargetId = null;
+    handPhysics.indexTipLocal = this.worldToBoardLocal(indexPosition);
 
     return {
       wristPose,
@@ -1320,10 +1587,13 @@ export class PodScene {
       indexDebugMesh,
       middleDebugMesh,
       openPalm: false,
+      pointingActive: false,
       pinchActive: false,
       pinchMidpointLocal: null,
       pinchCandidateId: null,
+      fingertipTargetId: null,
       grabbedPodId: null,
+      indexTipLocal: null,
       lastGrabPointLocal: null,
       lastGrabAt: 0,
     };
@@ -1429,10 +1699,13 @@ export class PodScene {
         this.releaseGrab(handedness);
       }
       handState.openPalm = false;
+      handState.pointingActive = false;
       handState.pinchActive = false;
       handState.pinchMidpointLocal = null;
       handState.pinchCandidateId = null;
+      handState.fingertipTargetId = null;
       handState.grabbedPodId = null;
+      handState.indexTipLocal = null;
       handState.lastGrabPointLocal = null;
       handState.lastGrabAt = 0;
       for (const [body, debugMesh] of [
@@ -1538,6 +1811,139 @@ export class PodScene {
     return null;
   }
 
+  private findPointingTarget(handState: HandPhysicsState): string | null {
+    if (!handState.indexTipLocal) {
+      return null;
+    }
+
+    return this.findNearestLivePodId(
+      this.collectPodIntersections(handState.indexCollider),
+      handState.indexTipLocal,
+    );
+  }
+
+  private findNearestLivePodId(
+    candidates: Iterable<string>,
+    pointLocal: THREE.Vector3 | null,
+  ): string | null {
+    let bestId: string | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const slaveId of candidates) {
+      const entry = this.meshById.get(slaveId);
+      if (!entry || String(entry.group.userData["status"] ?? "") === "SLAVE_STATUS_GONE") {
+        continue;
+      }
+
+      if (!pointLocal) {
+        return slaveId;
+      }
+
+      const position = this.podPhysicsById.get(slaveId)?.body.translation() ?? entry.group.position;
+      const distance = Math.hypot(
+        position.x - pointLocal.x,
+        position.y - pointLocal.y,
+        position.z - pointLocal.z,
+      );
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestId = slaveId;
+      }
+    }
+
+    return bestId;
+  }
+
+  private updateHudDebugState(
+    leftWristTracked: boolean,
+    trackedHands: ReadonlySet<"left" | "right">,
+  ): void {
+    const left = this.handPhysics.get("left");
+    const right = this.handPhysics.get("right");
+    const fingertipHand = left?.fingertipTargetId
+      ? "left"
+      : right?.fingertipTargetId
+        ? "right"
+        : null;
+
+    this.hudDebugData = {
+      leftTracked: leftWristTracked,
+      rightTracked: trackedHands.has("right"),
+      leftGesture: this.describeHandGesture(left, leftWristTracked),
+      rightGesture: this.describeHandGesture(right, trackedHands.has("right")),
+      pinchTargetId: left?.pinchCandidateId ?? right?.pinchCandidateId ?? null,
+      grabTargetId: left?.grabbedPodId ?? right?.grabbedPodId ?? null,
+      fingertipHand,
+      fingertipTargetId: fingertipHand
+        ? ((fingertipHand === "left" ? left?.fingertipTargetId : right?.fingertipTargetId) ?? null)
+        : null,
+    };
+    this.refreshHud();
+  }
+
+  private describeHandGesture(
+    handState: HandPhysicsState | undefined,
+    tracked: boolean,
+  ): HandGesture {
+    if (!tracked || !handState) {
+      return "TRACK LOST";
+    }
+    if (handState.grabbedPodId) {
+      return "GRAB";
+    }
+    if (handState.pinchActive) {
+      return "PINCH";
+    }
+    if (handState.pointingActive) {
+      return "POINT";
+    }
+    if (handState.openPalm) {
+      return "OPEN";
+    }
+    return "IDLE";
+  }
+
+  private refreshHud(): void {
+    const signature = JSON.stringify([this.hudData, this.hudDebugData]);
+    if (signature === this.lastHudSignature) {
+      return;
+    }
+    this.lastHudSignature = signature;
+    this.drawHud();
+  }
+
+  private resetHudDebugData(): void {
+    this.hudDebugData = {
+      leftTracked: false,
+      rightTracked: false,
+      leftGesture: "TRACK LOST",
+      rightGesture: "TRACK LOST",
+      pinchTargetId: null,
+      grabTargetId: null,
+      fingertipHand: null,
+      fingertipTargetId: null,
+    };
+    this.refreshHud();
+  }
+
+  private updatePointingHighlights(): void {
+    const activeTargetId = this.currentFingertipTargetId();
+    for (const [slaveId, entry] of this.meshById) {
+      const status = String(entry.group.userData["status"] ?? "");
+      entry.pointOutline.visible =
+        Boolean(activeTargetId) && slaveId === activeTargetId && status !== "SLAVE_STATUS_GONE";
+    }
+  }
+
+  private currentFingertipTargetId(): string | null {
+    return (
+      this.handPhysics.get("left")?.fingertipTargetId ??
+      this.handPhysics.get("right")?.fingertipTargetId ??
+      null
+    );
+  }
+
   private worldToBoardLocal(worldPoint: THREE.Vector3): THREE.Vector3 {
     return this.boardGroup.worldToLocal(worldPoint.clone());
   }
@@ -1610,4 +2016,26 @@ export class PodScene {
 function jointPosition(pose: XRJointPose, reusableMatrix: THREE.Matrix4): THREE.Vector3 {
   reusableMatrix.fromArray(pose.transform.matrix);
   return new THREE.Vector3().setFromMatrixPosition(reusableMatrix);
+}
+
+function truncateText(value: string, limit: number): string {
+  return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function formatHudId(value: string, maxLength = 18): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  const head = Math.max(4, Math.floor((maxLength - 2) * 0.65));
+  const tail = Math.max(4, maxLength - head - 2);
+  return `${value.slice(0, head)}..${value.slice(-tail)}`;
+}
+
+function splitHudLines(value: string, lineLength: number): string[] {
+  if (value.length <= lineLength) {
+    return [value];
+  }
+
+  return [value.slice(0, lineLength), value.slice(lineLength)];
 }
