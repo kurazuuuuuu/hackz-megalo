@@ -3,6 +3,7 @@ package controllerapp
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,8 +23,21 @@ func (s *RegistrationService) RegisterSlave(ctx context.Context, req *slavev1.Re
 		return nil, fmt.Errorf("redis client is required")
 	}
 
+	log.Printf(
+		"register slave requested pod=%s pod_uid=%s pod_ip=%s initial_remaining_turns=%d",
+		req.GetK8SPodName(),
+		req.GetK8SPodUid(),
+		req.GetPodIp(),
+		req.GetInitialRemainingTurns(),
+	)
 	sessionID, err := s.Redis.GetActiveSessionID(ctx)
 	if err != nil {
+		log.Printf(
+			"register slave failed to resolve active session pod=%s pod_uid=%s err=%v",
+			req.GetK8SPodName(),
+			req.GetK8SPodUid(),
+			err,
+		)
 		return nil, fmt.Errorf("get active session: %w", err)
 	}
 
@@ -43,14 +57,39 @@ func (s *RegistrationService) RegisterSlave(ctx context.Context, req *slavev1.Re
 	}
 
 	if err := s.Redis.PublishSlaveState(ctx, state); err != nil {
+		log.Printf(
+			"register slave failed to publish state session_id=%s pod=%s pod_uid=%s slave_id=%s err=%v",
+			sessionID,
+			state.K8sPodName,
+			state.K8sPodUID,
+			state.SlaveID,
+			err,
+		)
 		return nil, fmt.Errorf("publish slave state: %w", err)
 	}
-	if _, err := s.Redis.UpdateSessionMetrics(ctx, sessionID, func(metrics domain.SessionMetrics) domain.SessionMetrics {
+	metrics, err := s.Redis.UpdateSessionMetrics(ctx, sessionID, func(metrics domain.SessionMetrics) domain.SessionMetrics {
 		metrics.LiveSlaves++
 		return metrics
-	}); err != nil {
+	})
+	if err != nil {
+		log.Printf(
+			"register slave failed to update metrics session_id=%s pod=%s slave_id=%s err=%v",
+			sessionID,
+			state.K8sPodName,
+			state.SlaveID,
+			err,
+		)
 		return nil, fmt.Errorf("increment session live count: %w", err)
 	}
+	log.Printf(
+		"register slave success session_id=%s slave_id=%s pod=%s pod_uid=%s live=%d gone=%d",
+		sessionID,
+		state.SlaveID,
+		state.K8sPodName,
+		state.K8sPodUID,
+		metrics.LiveSlaves,
+		metrics.GoneSlaves,
+	)
 
 	return &slavev1.RegisterSlaveResponse{
 		SlaveId:    state.SlaveID,

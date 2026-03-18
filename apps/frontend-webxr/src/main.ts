@@ -1,6 +1,7 @@
 import "./style.css";
 
 import {
+  closeSessionSocket,
   connectSessionSocket,
   fetchSessionMetrics,
   sendPodStateUpdate,
@@ -152,7 +153,9 @@ disconnectButton.addEventListener("click", () => {
 
 window.addEventListener("beforeunload", () => {
   scene.dispose();
-  socket?.close();
+  if (socket) {
+    closeSessionSocket(socket);
+  }
 });
 
 void probeXRSupport();
@@ -253,7 +256,7 @@ async function startSession(): Promise<void> {
     if (socket) {
       const closingSocket = socket;
       socket = null;
-      closingSocket.close();
+      closeSessionSocket(closingSocket);
     }
 
     const message = error instanceof Error ? error.message : "セッションを開始できませんでした。";
@@ -304,7 +307,7 @@ async function disconnectSession(message: string): Promise<void> {
   if (socket) {
     const closingSocket = socket;
     socket = null;
-    closingSocket.close();
+    closeSessionSocket(closingSocket, true);
   }
 
   store.log({

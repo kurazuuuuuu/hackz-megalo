@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	websocketWriteWait  = 5 * time.Second
-	websocketPongWait   = 30 * time.Second
-	websocketPingPeriod = 10 * time.Second
+	websocketWriteWait              = 5 * time.Second
+	websocketPongWait               = 30 * time.Second
+	websocketPingPeriod             = 10 * time.Second
+	websocketExplicitDisconnectCode = 4000
 )
 
 type websocketClient struct {
@@ -100,20 +101,43 @@ type websocketClientMessage struct {
 }
 
 type masterServer struct {
-	redisClient *redislayer.Client
-	hub         *websocketHub
-	mu          sync.Mutex
-	sessionID   string
+	redisClient                  *redislayer.Client
+	hub                          *websocketHub
+	mu                           sync.Mutex
+	sessionID                    string
+	sessionMeta                  domain.SessionMeta
+	clientConnected              bool
+	sessionClosing               bool
+	sessionEndTimer              *time.Timer
+	sessionDisconnectGracePeriod time.Duration
 }
 
-func (s *masterServer) tryReserveSessionSlot() bool {
+func (s *masterServer) tryBeginSessionConnection() (domain.SessionMeta, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.sessionID == "pending" || s.clientConnected || s.sessionClosing {
+		log.Printf(
+			"reject websocket session connection current_session=%s client_connected=%t session_closing=%t",
+			s.sessionID,
+			s.clientConnected,
+			s.sessionClosing,
+		)
+		return domain.SessionMeta{}, false, false
+	}
+	if s.sessionEndTimer != nil {
+		s.sessionEndTimer.Stop()
+		s.sessionEndTimer = nil
+	}
 	if s.sessionID != "" {
-		return false
+		s.clientConnected = true
+		log.Printf("resume websocket session connection session_id=%s", s.sessionMeta.SessionID)
+		return s.sessionMeta, true, true
 	}
 	s.sessionID = "pending"
-	return true
+	s.clientConnected = true
+	log.Printf("reserve new websocket session slot")
+	return domain.SessionMeta{}, false, true
 }
 
 func (s *masterServer) startSession(ctx context.Context) (domain.SessionMeta, error) {
@@ -124,11 +148,7 @@ func (s *masterServer) startSession(ctx context.Context) (domain.SessionMeta, er
 	if err := s.redisClient.CreateSession(ctx, meta); err != nil {
 		return domain.SessionMeta{}, fmt.Errorf("create session: %w", err)
 	}
-
-	s.mu.Lock()
-	s.sessionID = meta.SessionID
-	s.mu.Unlock()
-
+	log.Printf("created websocket session session_id=%s started_at=%s", meta.SessionID, meta.StartedAt.Format(time.RFC3339Nano))
 	return meta, nil
 }
 
@@ -137,12 +157,14 @@ func (s *masterServer) endSession(ctx context.Context, sessionID string) error {
 		return nil
 	}
 
+	log.Printf("end session requested session_id=%s", sessionID)
 	if err := s.markAllSlavesGone(ctx, sessionID); err != nil {
 		return err
 	}
 	if err := s.redisClient.DeleteSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("delete session: %w", err)
 	}
+	log.Printf("end session completed session_id=%s", sessionID)
 	return nil
 }
 
@@ -151,6 +173,7 @@ func (s *masterServer) markAllSlavesGone(ctx context.Context, sessionID string) 
 	if err != nil {
 		return fmt.Errorf("list slave states before session end: %w", err)
 	}
+	log.Printf("mark all slaves gone session_id=%s count=%d", sessionID, len(states))
 
 	now := time.Now().UTC()
 	for _, state := range states {
@@ -175,12 +198,109 @@ func (s *masterServer) markAllSlavesGone(ctx context.Context, sessionID string) 
 	return nil
 }
 
-func (s *masterServer) releaseSessionSlot(sessionID string) {
+func (s *masterServer) commitSession(meta domain.SessionMeta) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if sessionID == "" || s.sessionID == sessionID || s.sessionID == "pending" {
+	s.sessionID = meta.SessionID
+	s.sessionMeta = meta
+	s.clientConnected = true
+	s.sessionClosing = false
+	log.Printf("commit websocket session session_id=%s", meta.SessionID)
+}
+
+func (s *masterServer) abortPendingSession() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionID == "pending" {
+		log.Printf("abort pending websocket session slot")
 		s.sessionID = ""
+		s.sessionMeta = domain.SessionMeta{}
+		s.clientConnected = false
 	}
+}
+
+func (s *masterServer) handleConnectionClosed(sessionID string, explicit bool) {
+	if strings.TrimSpace(sessionID) == "" {
+		s.abortPendingSession()
+		return
+	}
+
+	s.mu.Lock()
+	if s.sessionID != sessionID || s.sessionClosing {
+		s.mu.Unlock()
+		log.Printf(
+			"ignore websocket close session_id=%s current_session=%s session_closing=%t",
+			sessionID,
+			s.sessionID,
+			s.sessionClosing,
+		)
+		return
+	}
+	s.clientConnected = false
+	if s.sessionEndTimer != nil {
+		s.sessionEndTimer.Stop()
+		s.sessionEndTimer = nil
+	}
+	if explicit || s.sessionDisconnectGracePeriod == 0 {
+		s.sessionClosing = true
+		s.mu.Unlock()
+		log.Printf("close websocket session immediately session_id=%s explicit=%t", sessionID, explicit)
+		s.finalizeSession(sessionID)
+		return
+	}
+	s.mu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionID != sessionID || s.sessionClosing || s.clientConnected {
+		return
+	}
+	log.Printf(
+		"schedule session end after grace session_id=%s grace=%s",
+		sessionID,
+		s.sessionDisconnectGracePeriod,
+	)
+	s.sessionEndTimer = time.AfterFunc(s.sessionDisconnectGracePeriod, func() {
+		s.finishSession(sessionID)
+	})
+}
+
+func (s *masterServer) finishSession(sessionID string) {
+	s.mu.Lock()
+	if strings.TrimSpace(sessionID) == "" || s.sessionID != sessionID || s.clientConnected || s.sessionClosing {
+		s.mu.Unlock()
+		return
+	}
+	s.sessionClosing = true
+	if s.sessionEndTimer != nil {
+		s.sessionEndTimer.Stop()
+		s.sessionEndTimer = nil
+	}
+	s.mu.Unlock()
+
+	log.Printf("grace expired, finalizing session session_id=%s", sessionID)
+	s.finalizeSession(sessionID)
+}
+
+func (s *masterServer) finalizeSession(sessionID string) {
+	log.Printf("finalize session begin session_id=%s", sessionID)
+	if err := s.endSession(context.Background(), sessionID); err != nil {
+		log.Printf("end session %s: %v", sessionID, err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionEndTimer != nil {
+		s.sessionEndTimer.Stop()
+		s.sessionEndTimer = nil
+	}
+	if s.sessionID == sessionID {
+		s.sessionID = ""
+		s.sessionMeta = domain.SessionMeta{}
+	}
+	s.clientConnected = false
+	s.sessionClosing = false
+	log.Printf("finalize session complete session_id=%s", sessionID)
 }
 
 func (s *masterServer) currentSessionID() string {
@@ -210,8 +330,9 @@ func main() {
 	}
 
 	serverState := &masterServer{
-		redisClient: redisClient,
-		hub:         newWebsocketHub(),
+		redisClient:                  redisClient,
+		hub:                          newWebsocketHub(),
+		sessionDisconnectGracePeriod: cfg.SessionDisconnectGracePeriod,
 	}
 	go serverState.subscribeStateUpdates(ctx)
 
@@ -240,33 +361,43 @@ func main() {
 	mux.Handle("/internal/slaves", withAuth(http.HandlerFunc(serverState.handleListSlaveStates)))
 	mux.Handle("/internal/slaves/", withAuth(http.HandlerFunc(serverState.handleGetSlaveState)))
 	mux.Handle("/ws", withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !serverState.tryReserveSessionSlot() {
+		sessionMeta, resumed, ok := serverState.tryBeginSessionConnection()
+		if !ok {
+			log.Printf("reject websocket upgrade remote=%s reason=active session already exists", r.RemoteAddr)
 			http.Error(w, "active session already exists", http.StatusConflict)
 			return
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			serverState.releaseSessionSlot("")
+			log.Printf("websocket upgrade failed remote=%s resumed=%t err=%v", r.RemoteAddr, resumed, err)
+			if resumed {
+				serverState.handleConnectionClosed(sessionMeta.SessionID, false)
+			} else {
+				serverState.abortPendingSession()
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		sessionMeta, err := serverState.startSession(r.Context())
-		if err != nil {
-			serverState.releaseSessionSlot("")
-			_ = conn.Close()
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if !resumed {
+			sessionMeta, err = serverState.startSession(r.Context())
+			if err != nil {
+				serverState.abortPendingSession()
+				_ = conn.Close()
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			serverState.commitSession(sessionMeta)
 		}
+		log.Printf("websocket connected remote=%s session_id=%s resumed=%t", r.RemoteAddr, sessionMeta.SessionID, resumed)
 
 		client := serverState.hub.add(conn)
+		explicitDisconnect := false
 		defer func() {
 			serverState.hub.remove(conn)
-			if err := serverState.endSession(context.Background(), sessionMeta.SessionID); err != nil {
-				log.Printf("end session %s: %v", sessionMeta.SessionID, err)
-			}
-			serverState.releaseSessionSlot(sessionMeta.SessionID)
+			log.Printf("websocket disconnected remote=%s session_id=%s explicit=%t", r.RemoteAddr, sessionMeta.SessionID, explicitDisconnect)
+			serverState.handleConnectionClosed(sessionMeta.SessionID, explicitDisconnect)
 		}()
 
 		if err := conn.SetReadDeadline(time.Now().Add(websocketPongWait)); err != nil {
@@ -297,6 +428,25 @@ func main() {
 		for {
 			_, payload, err := conn.ReadMessage()
 			if err != nil {
+				explicitDisconnect = websocket.IsCloseError(err, websocketExplicitDisconnectCode)
+				if closeErr, ok := err.(*websocket.CloseError); ok {
+					log.Printf(
+						"websocket read closed remote=%s session_id=%s code=%d text=%s explicit=%t",
+						r.RemoteAddr,
+						sessionMeta.SessionID,
+						closeErr.Code,
+						closeErr.Text,
+						explicitDisconnect,
+					)
+				} else {
+					log.Printf(
+						"websocket read failed remote=%s session_id=%s explicit=%t err=%v",
+						r.RemoteAddr,
+						sessionMeta.SessionID,
+						explicitDisconnect,
+						err,
+					)
+				}
 				return
 			}
 			if err := serverState.handleClientMessage(r.Context(), sessionMeta.SessionID, payload); err != nil {
@@ -358,6 +508,14 @@ func (s *masterServer) handlePodStateUpdate(ctx context.Context, sessionID strin
 	if err != nil {
 		return err
 	}
+	log.Printf(
+		"frontend pod state update session_id=%s slave_id=%s previous_status=%s next_status=%s death_reason=%s",
+		sessionID,
+		message.SlaveID,
+		previousState.Status,
+		message.Status,
+		message.DeathReason,
+	)
 
 	nextState := previousState
 	nextState.Status = domain.SlaveStatusGone
@@ -407,6 +565,7 @@ func (s *masterServer) handlePublishEvent(w http.ResponseWriter, r *http.Request
 
 	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
 	if err != nil {
+		log.Printf("publish event rejected active session lookup failed err=%v", err)
 		http.Error(w, "active session not found", http.StatusConflict)
 		return
 	}
@@ -424,6 +583,7 @@ func (s *masterServer) handlePublishEvent(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	log.Printf("published event session_id=%s event_id=%d target_pod=%s", sessionID, event.EventID, event.TargetPod)
 
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(event)
@@ -437,6 +597,7 @@ func (s *masterServer) handleGetActiveSession(w http.ResponseWriter, r *http.Req
 
 	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
 	if err != nil {
+		log.Printf("get active session handler miss err=%v", err)
 		http.Error(w, "active session not found", http.StatusNotFound)
 		return
 	}
@@ -458,6 +619,7 @@ func (s *masterServer) handleGetActiveSessionMetrics(w http.ResponseWriter, r *h
 
 	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
 	if err != nil {
+		log.Printf("get active session metrics handler miss err=%v", err)
 		http.Error(w, "active session not found", http.StatusNotFound)
 		return
 	}
@@ -479,6 +641,7 @@ func (s *masterServer) handleListSlaveStates(w http.ResponseWriter, r *http.Requ
 
 	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
 	if err != nil {
+		log.Printf("list slave states with no active session err=%v", err)
 		_ = json.NewEncoder(w).Encode([]domain.SlaveState{})
 		return
 	}
@@ -506,6 +669,7 @@ func (s *masterServer) handleGetSlaveState(w http.ResponseWriter, r *http.Reques
 
 	sessionID, err := s.redisClient.GetActiveSessionID(r.Context())
 	if err != nil {
+		log.Printf("get slave state handler miss active session slave_id=%s err=%v", slaveID, err)
 		http.Error(w, "active session not found", http.StatusNotFound)
 		return
 	}

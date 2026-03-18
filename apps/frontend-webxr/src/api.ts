@@ -10,6 +10,9 @@ export const wsUrl =
   import.meta.env.VITE_WS_URL ||
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 
+export const explicitSessionDisconnectCode = 4000;
+export const explicitSessionDisconnectReason = "session_end";
+
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type")) {
@@ -82,6 +85,15 @@ export function connectSessionSocket(handlers: {
   socket.addEventListener("error", handlers.onError);
 
   return socket;
+}
+
+export function closeSessionSocket(socket: WebSocket, explicit = false): void {
+  if (explicit) {
+    socket.close(explicitSessionDisconnectCode, explicitSessionDisconnectReason);
+    return;
+  }
+
+  socket.close();
 }
 
 export async function waitForSessionSnapshot(): Promise<{

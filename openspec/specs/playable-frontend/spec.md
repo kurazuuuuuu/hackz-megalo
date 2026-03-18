@@ -27,22 +27,16 @@ The system SHALL display active Pod state in a real-time playable field in both 
 - **AND** the field uses passthrough presentation suitable for Meta Quest Browser
 
 ### Requirement: Pod Interaction Controls
-The system SHALL let the player target Pods and report authoritative Pod death states in desktop and WebXR play modes.
-
-#### Scenario: Player crushes a Pod
-- **WHEN** the player selects a Pod and crushes it from the frontend
-- **THEN** the frontend marks that Pod as `SLAVE_STATUS_GONE`
-- **AND** the frontend sends the updated state to the backend over the gameplay WebSocket
-
-#### Scenario: Pod falls from the board
-- **WHEN** a Pod leaves the board surface and falls out of the play area
-- **THEN** the frontend marks that Pod as `SLAVE_STATUS_GONE`
-- **AND** the frontend sends the updated state to the backend over the gameplay WebSocket
+The system SHALL let the player target Pods and explicitly end the authoritative gameplay session from desktop and WebXR play modes.
 
 #### Scenario: WebXR session can be disconnected in immersive mode
 - **WHEN** the player is inside WebXR mode
-- **THEN** the frontend shows an in-world control that can disconnect the WebSocket session
+- **THEN** the frontend shows an in-world control that can explicitly terminate the gameplay session
 - **AND** the same control exits the WebXR session
+
+#### Scenario: Desktop disconnect explicitly ends the session
+- **WHEN** the player presses the desktop disconnect control
+- **THEN** the frontend explicitly requests gameplay session termination before closing the WebSocket
 
 ### Requirement: Desktop-First MVP Fallback
 The system SHALL make the minimum playable frontend work without WebXR.
@@ -74,11 +68,11 @@ The system SHALL support immersive play in Meta Quest Browser using hand trackin
 - **AND** the XR experience does not depend on motion controllers
 
 ### Requirement: Wrist HUD in XR
-The system SHALL show live session state on a left wrist HUD while XR is active.
+The system SHALL show a left wrist HUD while XR is active at a size that remains readable without feeling cramped.
 
 #### Scenario: Player looks at the left wrist during XR
 - **WHEN** WebXR mode is active and the left hand is tracked
-- **THEN** the frontend displays the current session ID and live Pod counts on a watch-like HUD attached near the left wrist
+- **THEN** the frontend renders the wrist HUD with enough scale and internal spacing to keep debug text readable
 
 ### Requirement: XR Pod Board Physics
 The system SHALL simulate Pod motion on the XR board surface.
@@ -167,4 +161,13 @@ The system SHALL blend the machine illustration into the pre-session home screen
 - **WHEN** the pre-session home screen is rendered on a narrow viewport
 - **THEN** the illustration remains visible as a subdued background accent
 - **AND** the title, status text, and start button remain readable and usable without overlap issues
+
+### Requirement: Fingertip Pod Identification in XR
+The system SHALL identify Pods touched by a pointing fingertip and show that target both on the wrist HUD and on the pointed Pod itself.
+
+#### Scenario: Pointing fingertip touches a Pod
+- **WHEN** the player is in XR, the hand is recognized as pointing, and a fingertip collider intersects a live Pod
+- **THEN** the frontend determines the contacted Pod ID
+- **AND** the left wrist debug HUD displays that Pod ID as the current fingertip contact target
+- **AND** the contacted Gopher is rendered with an in-world outline highlight while it remains the active fingertip target
 
