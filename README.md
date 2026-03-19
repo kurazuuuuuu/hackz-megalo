@@ -7,16 +7,6 @@
 > 完全に一人プレイ専用です。
 > もし複数人がプレイするならその人数分GKEが必要になるのでインフラ費用が大変なことになります。
 
-## デプロイ
-(フロントエンドはCloudflare Accessでブロックされているためアクセスできません。)
-- Frontend: https://megalo-cup.krz-tech.net
-- Backend: https://megalo-cup.krz-tech.net
-
-## 総合テスト
-- `master-service` の HTTP / gRPC / WebSocket の連携確認は、事前に `docker compose up --build -d redis master-service controller-service slave-service` を実行してから `./scripts/test-master-service-integration.sh` を使います。
-- スクリプトは Docker 上の Go で `go test` を実行し、`HTTP -> controller-service の gRPC 連携 -> WebSocket` の一連の流れを検証します。
-- 接続先やネットワークを変えたい場合は `MASTER_BASE_URL`, `MASTER_WS_URL`, `TEST_TIMEOUT_SECONDS`, `INTEGRATION_DOCKER_NETWORK` を環境変数で上書きできます。
-
 ## 概要
 - KubernetesのPodをいじめたり観察して遊ぶやつ
 - Podが死んでも*k8sの素晴らしい力で新たな生命(Pod)が生えてくる*
