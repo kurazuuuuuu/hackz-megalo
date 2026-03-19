@@ -173,6 +173,7 @@ const HUD_TABLE_SLIDER_HEIGHT = 0.026;
 const HUD_TABLE_SLIDER_DEPTH_TOLERANCE = 0.05;
 const HUD_TABLE_SLIDER_DRAG_MARGIN = 0.018;
 const HUD_REDRAW_INTERVAL_MS = 80;
+const SPATIAL_ANCHORS_ENABLED = false;
 const XR_FOVEATION_LEVEL = 0;
 const DESKTOP_LOOK_SENSITIVITY = 0.0024;
 const DESKTOP_MOVE_SPEED = 0.6;
@@ -226,7 +227,7 @@ export class PodScene {
 
   private static readonly MIN_BOARD_SURFACE_HEIGHT = 0.22;
 
-  private static readonly MAX_BOARD_SURFACE_HEIGHT = 0.42;
+  private static readonly MAX_BOARD_SURFACE_HEIGHT = 1.0;
 
   private static readonly BOARD_FORWARD_DISTANCE = 0.45;
 
@@ -665,14 +666,21 @@ export class PodScene {
     this.applyRenderScale();
     const session = await maybeXR.xr.requestSession("immersive-ar", {
       requiredFeatures: ["local-floor"],
-      optionalFeatures: ["hand-tracking", "dom-overlay", "bounded-floor", "layers", "anchors"],
+      optionalFeatures: [
+        "hand-tracking",
+        "dom-overlay",
+        "bounded-floor",
+        "layers",
+        ...(SPATIAL_ANCHORS_ENABLED ? ["anchors"] : []),
+      ],
       domOverlay: { root: document.body },
     });
 
     session.addEventListener("end", this.handleXREnd);
     await this.renderer.xr.setSession(session);
     this.xrAnchorsSupported =
-      (session as XRSessionWithEnabledFeatures).enabledFeatures?.has("anchors") ?? false;
+      SPATIAL_ANCHORS_ENABLED &&
+      ((session as XRSessionWithEnabledFeatures).enabledFeatures?.has("anchors") ?? false);
     this.boardAnchorStatus = this.xrAnchorsSupported ? "READY" : "UNAVAILABLE";
     this.applyXRRenderQualitySettings();
     this.placeBoardForXR();
@@ -1959,6 +1967,7 @@ export class PodScene {
     this.tableMoveMode = false;
     this.tableMoveAwaitingConfirmRelease = false;
     if (
+      SPATIAL_ANCHORS_ENABLED &&
       this.xrAnchorsSupported &&
       typeof (frame as XRFrameWithAnchorCreation).createAnchor === "function"
     ) {
@@ -2779,9 +2788,10 @@ export class PodScene {
     }
 
     this.xrAnchorsSupported =
-      this.xrAnchorsSupported ||
-      (session as XRSessionWithEnabledFeatures).enabledFeatures?.has("anchors") === true ||
-      typeof (frame as XRFrameWithAnchorCreation).createAnchor === "function";
+      SPATIAL_ANCHORS_ENABLED &&
+      (this.xrAnchorsSupported ||
+        (session as XRSessionWithEnabledFeatures).enabledFeatures?.has("anchors") === true ||
+        typeof (frame as XRFrameWithAnchorCreation).createAnchor === "function");
     if (!this.tableMoveMode) {
       this.syncBoardPoseFromAnchor(frame, referenceSpace);
     }
