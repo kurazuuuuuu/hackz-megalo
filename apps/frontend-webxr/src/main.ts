@@ -84,7 +84,7 @@ app.innerHTML = `
                 <span>LMB Squash</span>
                 <span>DblClick Lock</span>
                 <span>Esc Unlock</span>
-                <span>E / R Reserved</span>
+                <span>E Gust / R Reserved</span>
               </div>
               <div class="scene-reticle">
                 <span class="scene-reticle-dot"></span>

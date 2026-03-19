@@ -1,0 +1,11 @@
+## 1. Implementation
+- [x] 1.1 Add an OpenSpec delta for the shared directional gust action
+- [x] 1.2 Detect the WebXR open-palm vertical sweep gesture from tracked hand joints with cooldown and stability thresholds
+- [x] 1.3 Trigger the same gust action from the desktop `E` binding while the desktop 3D scene is active
+- [x] 1.4 Simulate a short-lived wide gust volume that pushes intersected Pods away without crushing them
+- [x] 1.5 Update the scene overlay and XR debug state so the gust interaction is understandable during play
+- [x] 1.6 Add visible Three.js wind particles to the gust effect
+- [x] 1.7 Increase gust force so Pods fly away more aggressively
+- [x] 1.8 Allow grabbed Pods to rotate freely with the grab hand instead of staying axis-locked
+- [x] 1.9 Spawn Pods with a random initial facing direction that carries into physics
+- [x] 1.10 Validate with `vp check` and `docker compose build frontend-webxr`, then mark tasks complete
