@@ -91,6 +91,9 @@ interface HudDebugData {
   rightTracked: boolean;
   leftGesture: HandGesture;
   rightGesture: HandGesture;
+  fpsText: string;
+  cpuFrameText: string;
+  gpuFrameText: string;
   pinchTargetId: string | null;
   grabTargetId: string | null;
   fingertipHand: "left" | "right" | null;
@@ -98,6 +101,8 @@ interface HudDebugData {
   gustStatus: string;
   tableHeightCm: number;
   tableAdjustingHand: "left" | "right" | null;
+  tableMoveStatus: string;
+  anchorStatus: string;
 }
 
 interface HandJointTracking {
@@ -115,6 +120,24 @@ interface GustEntry {
   debugMesh: ColliderDebugMesh | null;
   particleMesh: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial> | null;
 }
+
+interface WebGLTimerQueryExtension {
+  TIME_ELAPSED_EXT: number;
+  GPU_DISJOINT_EXT: number;
+}
+
+interface SpatialAnchorHandle {
+  anchorSpace: XRSpace;
+  delete?: () => void;
+}
+
+type XRFrameWithAnchorCreation = XRFrame & {
+  createAnchor?: (pose: XRRigidTransform, space: XRSpace) => Promise<SpatialAnchorHandle>;
+};
+
+type XRSessionWithEnabledFeatures = XRSession & {
+  enabledFeatures?: Set<string>;
+};
 
 type ReservedDesktopBinding = "KeyE" | "KeyR";
 
@@ -149,6 +172,8 @@ const HUD_TABLE_SLIDER_WIDTH = 0.07;
 const HUD_TABLE_SLIDER_HEIGHT = 0.026;
 const HUD_TABLE_SLIDER_DEPTH_TOLERANCE = 0.05;
 const HUD_TABLE_SLIDER_DRAG_MARGIN = 0.018;
+const HUD_REDRAW_INTERVAL_MS = 80;
+const SPATIAL_ANCHORS_ENABLED = false;
 const XR_FOVEATION_LEVEL = 0;
 const DESKTOP_LOOK_SENSITIVITY = 0.0024;
 const DESKTOP_MOVE_SPEED = 0.6;
@@ -173,6 +198,7 @@ const GUST_PARTICLE_SEGMENTS = 18;
 const GUST_PARTICLE_LENGTH = 0.22;
 const GUST_PARTICLE_SPREAD = 0.08;
 const GRAB_RELEASE_GRACE_MS = 180;
+const FRAME_STATS_SMOOTHING = 0.18;
 
 function statusColor(pod: SlaveState): string {
   if (pod.status === "SLAVE_STATUS_GONE") {
@@ -201,7 +227,7 @@ export class PodScene {
 
   private static readonly MIN_BOARD_SURFACE_HEIGHT = 0.22;
 
-  private static readonly MAX_BOARD_SURFACE_HEIGHT = 0.42;
+  private static readonly MAX_BOARD_SURFACE_HEIGHT = 1.0;
 
   private static readonly BOARD_FORWARD_DISTANCE = 0.45;
 
@@ -225,6 +251,8 @@ export class PodScene {
 
   private readonly meshById = new Map<string, PodMeshEntry>();
 
+  private readonly podMeshCache: PodMeshEntry[] = [];
+
   private readonly podPhysicsById = new Map<string, PodPhysicsEntry>();
 
   private readonly podIdByColliderHandle = new Map<number, string>();
@@ -234,6 +262,8 @@ export class PodScene {
   private readonly handPhysics = new Map<"left" | "right", HandPhysicsState>();
 
   private readonly gusts: GustEntry[] = [];
+
+  private readonly gustPool: GustEntry[] = [];
 
   private readonly resizeObserver: ResizeObserver;
 
@@ -258,6 +288,10 @@ export class PodScene {
   private readonly hudButtonTexture: THREE.CanvasTexture;
 
   private readonly hudButtonMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+
+  private readonly hudMoveButtonTexture: THREE.CanvasTexture;
+
+  private readonly hudMoveButtonMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 
   private readonly tmpMatrix = new THREE.Matrix4();
 
@@ -285,6 +319,10 @@ export class PodScene {
 
   private hudSliderActiveHand: "left" | "right" | null = null;
 
+  private tableMoveMode = false;
+
+  private tableMoveAwaitingConfirmRelease = false;
+
   private hudData: HudData = {
     sessionId: "not connected",
     live: 0,
@@ -298,6 +336,9 @@ export class PodScene {
     rightTracked: false,
     leftGesture: "TRACK LOST",
     rightGesture: "TRACK LOST",
+    fpsText: "--",
+    cpuFrameText: "--",
+    gpuFrameText: "N/A",
     pinchTargetId: null,
     grabTargetId: null,
     fingertipHand: null,
@@ -305,11 +346,36 @@ export class PodScene {
     gustStatus: "READY",
     tableHeightCm: Math.round(PodScene.DEFAULT_BOARD_SURFACE_HEIGHT * 100),
     tableAdjustingHand: null,
+    tableMoveStatus: "IDLE",
+    anchorStatus: "NO XR",
   };
 
   private lastHudSignature = "";
 
+  private lastHudDrawAt = 0;
+
   private lastFrameTime = performance.now();
+
+  private smoothedFps = 0;
+
+  private smoothedCpuFrameMs = 0;
+
+  private smoothedGpuFrameMs: number | null = null;
+
+  private gpuTimerExtension: WebGLTimerQueryExtension | null = null;
+
+  private activeGpuTimerQuery: WebGLQuery | null = null;
+
+  private readonly pendingGpuTimerQueries: WebGLQuery[] = [];
+
+  private xrAnchorsSupported = false;
+
+  private boardAnchor: SpatialAnchorHandle | null = null;
+
+  private boardAnchorRequestId = 0;
+
+  private boardAnchorStatus: "NO XR" | "READY" | "LOCKING" | "LOCKED" | "UNAVAILABLE" | "FAILED" =
+    "NO XR";
 
   private pinchLatch = false;
 
@@ -424,6 +490,11 @@ export class PodScene {
     hudButtonCanvas.height = 128;
     this.hudButtonTexture = new THREE.CanvasTexture(hudButtonCanvas);
 
+    const hudMoveButtonCanvas = document.createElement("canvas");
+    hudMoveButtonCanvas.width = 256;
+    hudMoveButtonCanvas.height = 128;
+    this.hudMoveButtonTexture = new THREE.CanvasTexture(hudMoveButtonCanvas);
+
     const hudFace = new THREE.Mesh(
       new THREE.PlaneGeometry(HUD_FACE_WIDTH, HUD_FACE_HEIGHT),
       new THREE.MeshBasicMaterial({
@@ -434,14 +505,24 @@ export class PodScene {
     this.wristHud.add(hudFace);
 
     this.hudButtonMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.132, 0.041),
+      new THREE.PlaneGeometry(0.108, 0.041),
       new THREE.MeshBasicMaterial({
         map: this.hudButtonTexture,
         transparent: true,
       }),
     );
-    this.hudButtonMesh.position.set(0, -0.085, 0.002);
+    this.hudButtonMesh.position.set(-0.058, -0.085, 0.002);
     this.wristHud.add(this.hudButtonMesh);
+
+    this.hudMoveButtonMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.108, 0.041),
+      new THREE.MeshBasicMaterial({
+        map: this.hudMoveButtonTexture,
+        transparent: true,
+      }),
+    );
+    this.hudMoveButtonMesh.position.set(0.058, -0.085, 0.002);
+    this.wristHud.add(this.hudMoveButtonMesh);
 
     this.wristHud.rotation.x = -Math.PI / 2;
     this.wristHud.position.set(0.036, 0.02, 0.028);
@@ -450,7 +531,7 @@ export class PodScene {
     this.wristAnchor.add(this.wristHud);
     this.scene.add(this.wristAnchor);
 
-    this.refreshHud();
+    this.refreshHud(true);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
@@ -553,7 +634,7 @@ export class PodScene {
 
   setHudData(data: HudData): void {
     this.hudData = data;
-    this.refreshHud();
+    this.refreshHud(true);
   }
 
   async enterXR(): Promise<void> {
@@ -585,12 +666,22 @@ export class PodScene {
     this.applyRenderScale();
     const session = await maybeXR.xr.requestSession("immersive-ar", {
       requiredFeatures: ["local-floor"],
-      optionalFeatures: ["hand-tracking", "dom-overlay", "bounded-floor", "layers"],
+      optionalFeatures: [
+        "hand-tracking",
+        "dom-overlay",
+        "bounded-floor",
+        "layers",
+        ...(SPATIAL_ANCHORS_ENABLED ? ["anchors"] : []),
+      ],
       domOverlay: { root: document.body },
     });
 
     session.addEventListener("end", this.handleXREnd);
     await this.renderer.xr.setSession(session);
+    this.xrAnchorsSupported =
+      SPATIAL_ANCHORS_ENABLED &&
+      ((session as XRSessionWithEnabledFeatures).enabledFeatures?.has("anchors") ?? false);
+    this.boardAnchorStatus = this.xrAnchorsSupported ? "READY" : "UNAVAILABLE";
     this.applyXRRenderQualitySettings();
     this.placeBoardForXR();
     this.callbacks.onXRStateChange(true);
@@ -611,6 +702,10 @@ export class PodScene {
       this.wristAnchor.visible = false;
       this.resetBoardPlacement();
       this.hudSliderActiveHand = null;
+      this.tableMoveMode = false;
+      this.tableMoveAwaitingConfirmRelease = false;
+      this.clearBoardAnchor();
+      this.resetFrameStats();
       this.resetHudDebugData();
       return;
     }
@@ -625,6 +720,10 @@ export class PodScene {
     this.wristAnchor.visible = false;
     this.resetBoardPlacement();
     this.hudSliderActiveHand = null;
+    this.tableMoveMode = false;
+    this.tableMoveAwaitingConfirmRelease = false;
+    this.clearBoardAnchor();
+    this.resetFrameStats();
     this.resetHudDebugData();
   }
 
@@ -634,7 +733,7 @@ export class PodScene {
 
   reset(): void {
     for (const entry of this.meshById.values()) {
-      this.disposePodEntry(entry);
+      this.recyclePodEntry(entry);
     }
     this.meshById.clear();
 
@@ -656,10 +755,14 @@ export class PodScene {
     this.desktopGustCooldownUntil = 0;
     this.lastGustSource = null;
     this.hudSliderActiveHand = null;
+    this.tableMoveMode = false;
+    this.tableMoveAwaitingConfirmRelease = false;
     this.activePalmContacts.clear();
     this.clearHandState("left", true);
     this.clearHandState("right", true);
     this.podGrabOwnerById.clear();
+    this.clearBoardAnchor();
+    this.resetFrameStats();
     this.resetHudDebugData();
   }
 
@@ -676,11 +779,17 @@ export class PodScene {
       this.disposePodEntry(entry);
     }
     this.meshById.clear();
+    while (this.podMeshCache.length > 0) {
+      this.disposePodEntry(this.podMeshCache.pop()!);
+    }
 
     for (const podId of Array.from(this.podPhysicsById.keys())) {
       this.removePodPhysics(podId);
     }
     this.clearGusts();
+    while (this.gustPool.length > 0) {
+      this.disposeGustEntry(this.gustPool.pop()!);
+    }
     for (const handState of this.handPhysics.values()) {
       this.disposeHandDebugMeshes(handState);
     }
@@ -693,8 +802,11 @@ export class PodScene {
     this.boardShadow.material.dispose();
     this.hudFaceTexture.dispose();
     this.hudButtonTexture.dispose();
+    this.hudMoveButtonTexture.dispose();
     this.hudButtonMesh.geometry.dispose();
     this.hudButtonMesh.material.dispose();
+    this.hudMoveButtonMesh.geometry.dispose();
+    this.hudMoveButtonMesh.material.dispose();
     if (this.boardColliderDebugMesh) {
       this.colliderDebugGroup.remove(this.boardColliderDebugMesh);
       this.boardColliderDebugMesh.geometry.dispose();
@@ -702,6 +814,8 @@ export class PodScene {
       this.boardColliderDebugMesh = null;
     }
 
+    this.clearBoardAnchor();
+    this.resetFrameStats();
     this.physicsWorld?.free();
     this.physicsWorld = null;
 
@@ -1079,6 +1193,23 @@ export class PodScene {
   }
 
   private createPodMesh(slaveId: string): PodMeshEntry {
+    const cachedEntry = this.podMeshCache.pop();
+    if (cachedEntry) {
+      cachedEntry.group.userData["slaveId"] = slaveId;
+      cachedEntry.group.position.set(0, 0, 0);
+      cachedEntry.group.quaternion.identity();
+      cachedEntry.group.scale.setScalar(1);
+      cachedEntry.bodyMaterial.color.set("#00add8");
+      cachedEntry.bodyMaterial.emissive.set("#0b5d78");
+      cachedEntry.bodyMaterial.emissiveIntensity = 0.18;
+      cachedEntry.shield.visible = false;
+      cachedEntry.shield.material.opacity = 0.88;
+      cachedEntry.pointOutline.visible = false;
+      cachedEntry.phase = Math.random() * Math.PI * 2;
+      this.applyPodCrushVisual(cachedEntry, 0);
+      return cachedEntry;
+    }
+
     const group = new THREE.Group();
     const visualRoot = new THREE.Group();
     group.add(visualRoot);
@@ -1302,7 +1433,7 @@ export class PodScene {
       .setLinearDamping(8)
       .setAngularDamping(18)
       .setCcdEnabled(true)
-      .setCanSleep(false);
+      .setCanSleep(true);
 
     const body = this.physicsWorld.createRigidBody(bodyDesc);
     const colliderDesc = RAPIER.ColliderDesc.ball(POD_COLLIDER_RADIUS)
@@ -1359,12 +1490,27 @@ export class PodScene {
     });
   }
 
+  private recyclePodEntry(entry: PodMeshEntry): void {
+    this.boardGroup.remove(entry.group);
+    entry.group.position.set(0, 0, 0);
+    entry.group.quaternion.identity();
+    entry.group.scale.setScalar(1);
+    entry.group.userData["slaveId"] = "";
+    entry.bodyMaterial.color.set("#00add8");
+    entry.bodyMaterial.emissive.set("#0b5d78");
+    entry.bodyMaterial.emissiveIntensity = 0.18;
+    entry.shield.visible = false;
+    entry.shield.material.opacity = 0.88;
+    entry.pointOutline.visible = false;
+    this.applyPodCrushVisual(entry, 0);
+    this.podMeshCache.push(entry);
+  }
+
   private removePodEntry(slaveId: string, entry: PodMeshEntry): void {
     const owner = this.podGrabOwnerById.get(slaveId);
     if (owner) {
       this.releaseGrab(owner);
     }
-    this.disposePodEntry(entry);
     this.meshById.delete(slaveId);
     this.removePodPhysics(slaveId);
     this.podGrabOwnerById.delete(slaveId);
@@ -1377,6 +1523,7 @@ export class PodScene {
     if (this.desktopTargetPodId === slaveId) {
       this.setDesktopTargetPod(null, false);
     }
+    this.recyclePodEntry(entry);
   }
 
   private removePodPhysics(slaveId: string): void {
@@ -1422,6 +1569,11 @@ export class PodScene {
         ? `${this.hudDebugData.fingertipHand === "left" ? "L" : "R"} ${formatHudId(this.hudDebugData.fingertipTargetId, 20)}`
         : "none";
       const gustText = this.hudDebugData.gustStatus;
+      const fpsText = this.hudDebugData.fpsText;
+      const cpuFrameText = this.hudDebugData.cpuFrameText;
+      const gpuFrameText = this.hudDebugData.gpuFrameText;
+      const tableMoveStatus = this.hudDebugData.tableMoveStatus;
+      const anchorStatus = this.hudDebugData.anchorStatus;
       const sliderCenterX = hudLocalToCanvasX(HUD_TABLE_SLIDER_CENTER_X, width);
       const sliderCenterY = hudLocalToCanvasY(HUD_TABLE_SLIDER_CENTER_Y, height);
       const sliderWidthPx = (HUD_TABLE_SLIDER_WIDTH / HUD_FACE_WIDTH) * width;
@@ -1573,9 +1725,31 @@ export class PodScene {
       faceContext.fillStyle = gustText.startsWith("CD") ? "#ffd3a0" : "#baf4ff";
       faceContext.fillText(gustText, 392, 360);
 
+      faceContext.fillStyle = "rgba(7, 11, 14, 0.56)";
+      faceContext.beginPath();
+      faceContext.roundRect(width - 208, 104, 152, 126, 24);
+      faceContext.fill();
+      faceContext.strokeStyle = "rgba(137, 224, 247, 0.18)";
+      faceContext.lineWidth = 2;
+      faceContext.stroke();
+
+      faceContext.fillStyle = "rgba(210, 219, 224, 0.72)";
+      faceContext.font = "600 14px sans-serif";
+      faceContext.fillText("FRAME STATS", width - 188, 132);
+      faceContext.fillText("FPS", width - 188, 160);
+      faceContext.fillText("CPU", width - 188, 188);
+      faceContext.fillText("GPU", width - 188, 216);
+      faceContext.fillStyle = "#dff8ff";
+      faceContext.font = "700 16px monospace";
+      faceContext.fillText(fpsText, width - 128, 160);
+      faceContext.fillStyle = "#baf4ff";
+      faceContext.fillText(cpuFrameText, width - 128, 188);
+      faceContext.fillStyle = gpuFrameText === "N/A" ? "rgba(235, 240, 243, 0.82)" : "#ffd3a0";
+      faceContext.fillText(gpuFrameText, width - 128, 216);
+
       faceContext.fillStyle = "rgba(7, 11, 14, 0.46)";
       faceContext.beginPath();
-      faceContext.roundRect(width - 208, 252, 152, 118, 24);
+      faceContext.roundRect(width - 208, 252, 152, 134, 24);
       faceContext.fill();
       faceContext.strokeStyle = "rgba(137, 224, 247, 0.18)";
       faceContext.lineWidth = 2;
@@ -1596,10 +1770,25 @@ export class PodScene {
 
       faceContext.fillStyle = "rgba(210, 219, 224, 0.72)";
       faceContext.font = "600 13px sans-serif";
-      faceContext.fillText("TABLE HEIGHT", width - 188, 342);
+      faceContext.fillText("TABLE MODE", width - 188, 344);
+      faceContext.fillText("ANCHOR", width - 188, 362);
+      faceContext.fillStyle = tableMoveStatus.startsWith("PREVIEW") ? "#ffd3a0" : "#dff8ff";
+      faceContext.font = "700 12px monospace";
+      faceContext.fillText(tableMoveStatus, width - 114, 344);
+      faceContext.fillStyle =
+        anchorStatus === "LOCKED"
+          ? "#9ef0bc"
+          : anchorStatus === "UNAVAILABLE"
+            ? "#efcf93"
+            : "#dff8ff";
+      faceContext.fillText(anchorStatus, width - 114, 362);
+
+      faceContext.fillStyle = "rgba(210, 219, 224, 0.72)";
+      faceContext.font = "600 13px sans-serif";
+      faceContext.fillText("TABLE HEIGHT", width - 188, 378);
       faceContext.textAlign = "right";
       faceContext.fillStyle = sliderAccent;
-      faceContext.fillText(sliderValueText, width - 72, 342);
+      faceContext.fillText(sliderValueText, width - 72, 378);
       faceContext.textAlign = "left";
 
       faceContext.fillStyle = "rgba(10, 14, 18, 0.8)";
@@ -1654,11 +1843,32 @@ export class PodScene {
       buttonContext.lineWidth = 4;
       buttonContext.stroke();
       buttonContext.fillStyle = "#fff0f0";
-      buttonContext.font = "600 25px sans-serif";
+      buttonContext.font = "600 22px sans-serif";
       buttonContext.textAlign = "center";
       buttonContext.textBaseline = "middle";
       buttonContext.fillText("Disconnect", 128, 64);
       this.hudButtonTexture.needsUpdate = true;
+    }
+
+    const moveButtonCanvas = this.hudMoveButtonTexture.image as HTMLCanvasElement;
+    const moveButtonContext = moveButtonCanvas.getContext("2d");
+    if (moveButtonContext) {
+      moveButtonContext.clearRect(0, 0, moveButtonCanvas.width, moveButtonCanvas.height);
+      moveButtonContext.fillStyle = "rgba(16, 24, 27, 0.9)";
+      moveButtonContext.beginPath();
+      moveButtonContext.roundRect(8, 8, 240, 112, 36);
+      moveButtonContext.fill();
+      moveButtonContext.strokeStyle = this.tableMoveMode
+        ? "rgba(255, 206, 118, 0.62)"
+        : "rgba(134, 231, 255, 0.48)";
+      moveButtonContext.lineWidth = 4;
+      moveButtonContext.stroke();
+      moveButtonContext.fillStyle = this.tableMoveMode ? "#fff1d7" : "#e5fbff";
+      moveButtonContext.font = "600 21px sans-serif";
+      moveButtonContext.textAlign = "center";
+      moveButtonContext.textBaseline = "middle";
+      moveButtonContext.fillText(this.tableMoveMode ? "Previewing" : "Move Table", 128, 64);
+      this.hudMoveButtonTexture.needsUpdate = true;
     }
   }
 
@@ -1712,6 +1922,162 @@ export class PodScene {
     this.boardGroup.position.y = this.boardSurfaceHeight - PodScene.BOARD_TOP_Y;
   }
 
+  private startTableMoveMode(): void {
+    if (!this.renderer.xr.isPresenting) {
+      return;
+    }
+
+    this.tableMoveMode = true;
+    this.tableMoveAwaitingConfirmRelease = true;
+    this.hudSliderActiveHand = null;
+    if (this.handPhysics.get("right")?.grabbedPodId) {
+      this.releaseGrab("right");
+    }
+    this.clearBoardAnchor();
+    this.refreshHud(true);
+  }
+
+  private updateTableMoveInteraction(
+    frame: XRFrame,
+    referenceSpace: XRReferenceSpace,
+    trackedHands: ReadonlySet<"left" | "right">,
+  ): void {
+    if (!this.tableMoveMode) {
+      return;
+    }
+
+    const rightHand = this.handPhysics.get("right");
+    if (!trackedHands.has("right") || !rightHand?.palmCenterWorld) {
+      return;
+    }
+
+    rightHand.pinchCandidateId = null;
+    rightHand.fingertipTargetId = null;
+    this.updateTableMovePreviewPose(rightHand.pinchMidpointWorld ?? rightHand.palmCenterWorld);
+
+    if (!rightHand.pinchActive) {
+      this.tableMoveAwaitingConfirmRelease = false;
+      return;
+    }
+
+    if (this.tableMoveAwaitingConfirmRelease) {
+      return;
+    }
+
+    this.tableMoveMode = false;
+    this.tableMoveAwaitingConfirmRelease = false;
+    if (
+      SPATIAL_ANCHORS_ENABLED &&
+      this.xrAnchorsSupported &&
+      typeof (frame as XRFrameWithAnchorCreation).createAnchor === "function"
+    ) {
+      this.boardAnchorStatus = "LOCKING";
+      void this.createBoardAnchor(frame, referenceSpace);
+    } else {
+      this.boardAnchorStatus = "UNAVAILABLE";
+    }
+    this.refreshHud(true);
+  }
+
+  private updateTableMovePreviewPose(targetWorld: THREE.Vector3): void {
+    const xrCamera = this.renderer.xr.getCamera();
+    const viewerPosition = new THREE.Vector3();
+    xrCamera.getWorldPosition(viewerPosition);
+
+    const surfaceHeight = THREE.MathUtils.clamp(
+      targetWorld.y,
+      PodScene.MIN_BOARD_SURFACE_HEIGHT,
+      PodScene.MAX_BOARD_SURFACE_HEIGHT,
+    );
+    const boardPosition = targetWorld.clone();
+    boardPosition.y = surfaceHeight - PodScene.BOARD_TOP_Y;
+    this.boardGroup.position.copy(boardPosition);
+    this.boardGroup.lookAt(viewerPosition.x, boardPosition.y, viewerPosition.z);
+    this.boardGroup.rotateY(Math.PI);
+    this.boardSurfaceHeight = surfaceHeight;
+  }
+
+  private async createBoardAnchor(frame: XRFrame, referenceSpace: XRReferenceSpace): Promise<void> {
+    const createAnchor = (frame as XRFrameWithAnchorCreation).createAnchor;
+    if (!createAnchor) {
+      this.boardAnchorStatus = "UNAVAILABLE";
+      this.refreshHud(true);
+      return;
+    }
+
+    const requestId = ++this.boardAnchorRequestId;
+    const anchorTransform = new XRRigidTransform(
+      {
+        x: this.boardGroup.position.x,
+        y: this.boardGroup.position.y,
+        z: this.boardGroup.position.z,
+      },
+      {
+        x: this.boardGroup.quaternion.x,
+        y: this.boardGroup.quaternion.y,
+        z: this.boardGroup.quaternion.z,
+        w: this.boardGroup.quaternion.w,
+      },
+    );
+
+    try {
+      const anchor = await createAnchor.call(frame, anchorTransform, referenceSpace);
+      if (requestId !== this.boardAnchorRequestId) {
+        anchor.delete?.();
+        return;
+      }
+      this.clearBoardAnchor(false);
+      this.boardAnchor = anchor;
+      this.boardAnchorStatus = "LOCKED";
+      this.refreshHud(true);
+    } catch {
+      if (requestId !== this.boardAnchorRequestId) {
+        return;
+      }
+      this.boardAnchorStatus = "FAILED";
+      this.refreshHud(true);
+    }
+  }
+
+  private syncBoardPoseFromAnchor(frame: XRFrame, referenceSpace: XRReferenceSpace): void {
+    if (!this.boardAnchor) {
+      return;
+    }
+
+    const pose = frame.getPose(this.boardAnchor.anchorSpace, referenceSpace);
+    if (!pose) {
+      return;
+    }
+
+    this.boardGroup.position.set(
+      pose.transform.position.x,
+      pose.transform.position.y,
+      pose.transform.position.z,
+    );
+    this.boardGroup.quaternion.set(
+      pose.transform.orientation.x,
+      pose.transform.orientation.y,
+      pose.transform.orientation.z,
+      pose.transform.orientation.w,
+    );
+    this.boardSurfaceHeight = this.boardGroup.position.y + PodScene.BOARD_TOP_Y;
+  }
+
+  private clearBoardAnchor(incrementRequestId = true): void {
+    if (incrementRequestId) {
+      this.boardAnchorRequestId += 1;
+    }
+    this.boardAnchor?.delete?.();
+    this.boardAnchor = null;
+    if (!this.renderer.xr.isPresenting) {
+      this.boardAnchorStatus = "NO XR";
+    } else if (!this.xrAnchorsSupported) {
+      this.boardAnchorStatus = "UNAVAILABLE";
+    } else {
+      this.boardAnchorStatus = "READY";
+    }
+  }
+
   private readonly handleXREnd = (): void => {
     this.callbacks.onXRStateChange(false);
     this.wristAnchor.visible = false;
@@ -1724,8 +2090,12 @@ export class PodScene {
     this.setDesktopTargetPod(null, false);
     this.pinchLatch = false;
     this.hudSliderActiveHand = null;
+    this.tableMoveMode = false;
+    this.tableMoveAwaitingConfirmRelease = false;
     this.clearHandState("left", true);
     this.clearHandState("right", true);
+    this.clearBoardAnchor();
+    this.resetFrameStats();
     this.resetBoardPlacement();
     this.resetHudDebugData();
   };
@@ -1747,25 +2117,144 @@ export class PodScene {
     const now = performance.now();
     const delta = Math.min(0.05, (now - this.lastFrameTime) / 1000);
     this.lastFrameTime = now;
+    const frameStart = performance.now();
 
     this.updateSimulation(delta, now);
 
     if (!this.renderer.xr.isPresenting) {
       this.wristAnchor.visible = false;
       this.pinchLatch = false;
+      this.tableMoveMode = false;
+      this.tableMoveAwaitingConfirmRelease = false;
       this.clearPalmContacts("left");
       this.clearPalmContacts("right");
       this.clearHandState("left", false);
       this.clearHandState("right", false);
+      this.resetFrameStats();
       this.updateDesktopMovement(delta);
       this.updateDesktopTargeting();
       this.renderer.render(this.scene, this.camera);
       return;
     }
 
+    this.beginGpuTimerQuery();
     this.updateWristHud();
     this.renderer.render(this.scene, this.camera);
+    this.endGpuTimerQuery();
+    this.recordFrameStats(delta, performance.now() - frameStart);
   };
+
+  private recordFrameStats(deltaSeconds: number, cpuFrameMs: number): void {
+    const frameRate = deltaSeconds > 1e-6 ? 1 / deltaSeconds : 0;
+    this.smoothedFps =
+      this.smoothedFps > 0
+        ? THREE.MathUtils.lerp(this.smoothedFps, frameRate, FRAME_STATS_SMOOTHING)
+        : frameRate;
+    this.smoothedCpuFrameMs =
+      this.smoothedCpuFrameMs > 0
+        ? THREE.MathUtils.lerp(this.smoothedCpuFrameMs, cpuFrameMs, FRAME_STATS_SMOOTHING)
+        : cpuFrameMs;
+    this.pollGpuTimerQueries();
+  }
+
+  private resetFrameStats(): void {
+    this.smoothedFps = 0;
+    this.smoothedCpuFrameMs = 0;
+    this.smoothedGpuFrameMs = null;
+    this.disposeGpuTimerQueries();
+  }
+
+  private beginGpuTimerQuery(): void {
+    const gl = this.renderer.getContext();
+    if (!(gl instanceof WebGL2RenderingContext)) {
+      return;
+    }
+
+    if (this.gpuTimerExtension === null) {
+      this.gpuTimerExtension = gl.getExtension(
+        "EXT_disjoint_timer_query_webgl2",
+      ) as WebGLTimerQueryExtension | null;
+    }
+    if (!this.gpuTimerExtension || this.activeGpuTimerQuery) {
+      return;
+    }
+
+    const query = gl.createQuery();
+    if (!query) {
+      return;
+    }
+
+    gl.beginQuery(this.gpuTimerExtension.TIME_ELAPSED_EXT, query);
+    this.activeGpuTimerQuery = query;
+  }
+
+  private endGpuTimerQuery(): void {
+    const gl = this.renderer.getContext();
+    if (
+      !(gl instanceof WebGL2RenderingContext) ||
+      !this.gpuTimerExtension ||
+      !this.activeGpuTimerQuery
+    ) {
+      return;
+    }
+
+    gl.endQuery(this.gpuTimerExtension.TIME_ELAPSED_EXT);
+    this.pendingGpuTimerQueries.push(this.activeGpuTimerQuery);
+    this.activeGpuTimerQuery = null;
+    this.pollGpuTimerQueries();
+  }
+
+  private pollGpuTimerQueries(): void {
+    const gl = this.renderer.getContext();
+    if (!(gl instanceof WebGL2RenderingContext) || !this.gpuTimerExtension) {
+      return;
+    }
+
+    const disjoint = Boolean(gl.getParameter(this.gpuTimerExtension.GPU_DISJOINT_EXT));
+    if (disjoint) {
+      this.smoothedGpuFrameMs = null;
+      this.disposeGpuTimerQueries();
+      return;
+    }
+
+    while (this.pendingGpuTimerQueries.length > 0) {
+      const query = this.pendingGpuTimerQueries[0]!;
+      const available = Boolean(gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE));
+      if (!available) {
+        break;
+      }
+
+      this.pendingGpuTimerQueries.shift();
+      const elapsedNanoseconds = Number(gl.getQueryParameter(query, gl.QUERY_RESULT));
+      gl.deleteQuery(query);
+      if (!Number.isFinite(elapsedNanoseconds) || elapsedNanoseconds <= 0) {
+        continue;
+      }
+
+      const gpuFrameMs = elapsedNanoseconds / 1_000_000;
+      this.smoothedGpuFrameMs =
+        this.smoothedGpuFrameMs == null
+          ? gpuFrameMs
+          : THREE.MathUtils.lerp(this.smoothedGpuFrameMs, gpuFrameMs, FRAME_STATS_SMOOTHING);
+    }
+  }
+
+  private disposeGpuTimerQueries(): void {
+    const gl = this.renderer.getContext();
+    if (!(gl instanceof WebGL2RenderingContext)) {
+      this.pendingGpuTimerQueries.length = 0;
+      this.activeGpuTimerQuery = null;
+      return;
+    }
+
+    if (this.activeGpuTimerQuery) {
+      gl.deleteQuery(this.activeGpuTimerQuery);
+      this.activeGpuTimerQuery = null;
+    }
+    while (this.pendingGpuTimerQueries.length > 0) {
+      gl.deleteQuery(this.pendingGpuTimerQueries.pop()!);
+    }
+  }
 
   private updateSimulation(delta: number, nowMs: number): void {
     if (!this.physicsWorld) {
@@ -1939,6 +2428,7 @@ export class PodScene {
       return;
     }
 
+    this.wakePodBody(physicsEntry);
     const currentVelocity = physicsEntry.body.linvel();
     this.tmpVector.copy(directionLocal).multiplyScalar(GUST_PUSH_SPEED);
     const nextVelocity = {
@@ -2105,12 +2595,47 @@ export class PodScene {
       PodScene.BOARD_TOP_Y + 0.18,
     );
 
+    const gust = this.acquireGust();
+    if (!gust) {
+      return false;
+    }
+
+    gust.directionLocal.copy(gustDirection);
+    gust.remaining = GUST_LIFETIME;
+    gust.hitPodIds.clear();
+    gust.body.setTranslation({ x: gustStart.x, y: gustStart.y, z: gustStart.z }, false);
+    gust.body.setNextKinematicTranslation({ x: gustStart.x, y: gustStart.y, z: gustStart.z });
+    if (gust.debugMesh) {
+      gust.debugMesh.visible = true;
+      gust.debugMesh.position.copy(gustStart);
+    }
+    if (gust.particleMesh) {
+      gust.particleMesh.visible = true;
+      gust.particleMesh.position.copy(gustStart);
+      gust.particleMesh.material.opacity = 0.78;
+      gust.particleMesh.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 0, 1),
+        gustDirection.clone(),
+      );
+    }
+
+    this.gusts.push(gust);
+    this.lastGustSource = source;
+    return true;
+  }
+
+  private acquireGust(): GustEntry | null {
+    if (!this.physicsWorld) {
+      return null;
+    }
+
+    const pooled = this.gustPool.pop();
+    if (pooled) {
+      return pooled;
+    }
+
     const body = this.physicsWorld.createRigidBody(
-      RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(
-        gustStart.x,
-        gustStart.y,
-        gustStart.z,
-      ),
+      RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, HAND_PARK_Y, 0),
     );
     const collider = this.physicsWorld.createCollider(
       RAPIER.ColliderDesc.ball(GUST_SENSOR_RADIUS).setSensor(true),
@@ -2120,25 +2645,25 @@ export class PodScene {
     let debugMesh: ColliderDebugMesh | null = null;
     if (COLLIDER_DEBUG_ENABLED) {
       debugMesh = this.createColliderDebugSphere(GUST_SENSOR_RADIUS, "#7fe8ff");
-      debugMesh.position.copy(gustStart);
+      debugMesh.visible = false;
+      debugMesh.position.set(0, HAND_PARK_Y, 0);
       this.colliderDebugGroup.add(debugMesh);
     }
 
-    const particleMesh = this.createGustParticleMesh(gustDirection);
-    particleMesh.position.copy(gustStart);
+    const particleMesh = this.createGustParticleMesh(new THREE.Vector3(0, 0, 1));
+    particleMesh.visible = false;
+    particleMesh.position.set(0, HAND_PARK_Y, 0);
     this.boardGroup.add(particleMesh);
 
-    this.gusts.push({
+    return {
       body,
       collider,
-      directionLocal: gustDirection,
-      remaining: GUST_LIFETIME,
+      directionLocal: new THREE.Vector3(0, 0, 1),
+      remaining: 0,
       hitPodIds: new Set<string>(),
       debugMesh,
       particleMesh,
-    });
-    this.lastGustSource = source;
-    return true;
+    };
   }
 
   private normalizeGustDirection(directionLocal: THREE.Vector3): THREE.Vector3 {
@@ -2212,6 +2737,29 @@ export class PodScene {
       this.gusts.splice(index, 1);
     }
 
+    gust.remaining = 0;
+    gust.hitPodIds.clear();
+    gust.body.setTranslation({ x: 0, y: HAND_PARK_Y, z: 0 }, false);
+    gust.body.setNextKinematicTranslation({ x: 0, y: HAND_PARK_Y, z: 0 });
+    if (gust.debugMesh) {
+      gust.debugMesh.visible = false;
+      gust.debugMesh.position.set(0, HAND_PARK_Y, 0);
+    }
+    if (gust.particleMesh) {
+      gust.particleMesh.visible = false;
+      gust.particleMesh.position.set(0, HAND_PARK_Y, 0);
+      gust.particleMesh.material.opacity = 0.78;
+    }
+    this.gustPool.push(gust);
+  }
+
+  private clearGusts(): void {
+    while (this.gusts.length > 0) {
+      this.removeGust(this.gusts[this.gusts.length - 1]!);
+    }
+  }
+
+  private disposeGustEntry(gust: GustEntry): void {
     if (gust.debugMesh) {
       this.colliderDebugGroup.remove(gust.debugMesh);
       gust.debugMesh.geometry.dispose();
@@ -2223,12 +2771,6 @@ export class PodScene {
       gust.particleMesh.material.dispose();
     }
     this.physicsWorld?.removeRigidBody(gust.body);
-  }
-
-  private clearGusts(): void {
-    while (this.gusts.length > 0) {
-      this.removeGust(this.gusts[this.gusts.length - 1]!);
-    }
   }
 
   private updateWristHud(): void {
@@ -2245,15 +2787,26 @@ export class PodScene {
       return;
     }
 
+    this.xrAnchorsSupported =
+      SPATIAL_ANCHORS_ENABLED &&
+      (this.xrAnchorsSupported ||
+        (session as XRSessionWithEnabledFeatures).enabledFeatures?.has("anchors") === true ||
+        typeof (frame as XRFrameWithAnchorCreation).createAnchor === "function");
+    if (!this.tableMoveMode) {
+      this.syncBoardPoseFromAnchor(frame, referenceSpace);
+    }
     this.boardGroup.updateMatrixWorld(true);
 
     let leftWristTracked = false;
-    let buttonTouched = false;
+    let disconnectButtonTouched = false;
+    let moveButtonTouched = false;
     let pinchDetected = false;
     const trackedHands = new Set<"left" | "right">();
 
-    const buttonWorld = new THREE.Vector3();
-    this.hudButtonMesh.getWorldPosition(buttonWorld);
+    const disconnectButtonWorld = new THREE.Vector3();
+    this.hudButtonMesh.getWorldPosition(disconnectButtonWorld);
+    const moveButtonWorld = new THREE.Vector3();
+    this.hudMoveButtonMesh.getWorldPosition(moveButtonWorld);
 
     for (const inputSource of session.inputSources) {
       if (!inputSource.hand) {
@@ -2291,8 +2844,11 @@ export class PodScene {
           pinchDetected = true;
         }
 
-        if (tracking.indexWorld.distanceTo(buttonWorld) < 0.045) {
-          buttonTouched = true;
+        if (tracking.indexWorld.distanceTo(disconnectButtonWorld) < 0.04) {
+          disconnectButtonTouched = true;
+        }
+        if (tracking.indexWorld.distanceTo(moveButtonWorld) < 0.04) {
+          moveButtonTouched = true;
         }
       }
     }
@@ -2321,22 +2877,38 @@ export class PodScene {
         : null;
     }
     this.updateTableHeightSliderInteraction(leftWristTracked, trackedHands);
+    this.updateTableMoveInteraction(frame, referenceSpace, trackedHands);
     this.updateGrabInteraction("left");
-    this.updateGrabInteraction("right");
+    if (!this.tableMoveMode) {
+      this.updateGrabInteraction("right");
+    }
     this.tryTriggerHandGust("left");
-    this.tryTriggerHandGust("right");
+    if (!this.tableMoveMode) {
+      this.tryTriggerHandGust("right");
+    }
     this.updateHudDebugState(leftWristTracked, trackedHands);
     this.updatePointingHighlights();
 
     this.processOpenPalmContacts("left");
-    this.processOpenPalmContacts("right");
+    if (!this.tableMoveMode) {
+      this.processOpenPalmContacts("right");
+    } else {
+      this.clearPalmContacts("right");
+    }
 
     const now = performance.now();
-    if (buttonTouched && pinchDetected && !this.pinchLatch && now - this.lastDisconnectAt > 1200) {
+    if (moveButtonTouched && pinchDetected && !this.pinchLatch) {
+      this.startTableMoveMode();
+    } else if (
+      disconnectButtonTouched &&
+      pinchDetected &&
+      !this.pinchLatch &&
+      now - this.lastDisconnectAt > 1200
+    ) {
       this.lastDisconnectAt = now;
       this.callbacks.onDisconnect();
     }
-    this.pinchLatch = buttonTouched && pinchDetected;
+    this.pinchLatch = (disconnectButtonTouched || moveButtonTouched) && pinchDetected;
   }
 
   private updateHandPhysicsFromJoints(
@@ -2655,6 +3227,11 @@ export class PodScene {
     leftWristTracked: boolean,
     trackedHands: ReadonlySet<"left" | "right">,
   ): void {
+    if (this.tableMoveMode) {
+      this.hudSliderActiveHand = null;
+      return;
+    }
+
     if (!leftWristTracked || !this.wristAnchor.visible) {
       this.hudSliderActiveHand = null;
       return;
@@ -2740,6 +3317,7 @@ export class PodScene {
     }
 
     const position = physicsEntry.body.translation();
+    this.wakePodBody(physicsEntry);
     physicsEntry.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
     physicsEntry.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     physicsEntry.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
@@ -2816,6 +3394,7 @@ export class PodScene {
       }
 
       const target = handState.pinchMidpointLocal;
+      this.wakePodBody(physicsEntry);
       physicsEntry.body.setNextKinematicTranslation({ x: target.x, y: target.y, z: target.z });
       if (handState.gripRotationLocal) {
         const targetRotation = handState.grabRotationOffset
@@ -2856,6 +3435,7 @@ export class PodScene {
       currentRotation.z,
       currentRotation.w,
     );
+    this.wakePodBody(physicsEntry);
     physicsEntry.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
     physicsEntry.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     physicsEntry.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
@@ -2902,6 +3482,7 @@ export class PodScene {
     const podId = handState.grabbedPodId;
     const physicsEntry = this.podPhysicsById.get(podId);
     if (physicsEntry) {
+      this.wakePodBody(physicsEntry);
       physicsEntry.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
       physicsEntry.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       physicsEntry.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
@@ -3115,6 +3696,9 @@ export class PodScene {
       rightTracked: trackedHands.has("right"),
       leftGesture: this.describeHandGesture(left, leftWristTracked),
       rightGesture: this.describeHandGesture(right, trackedHands.has("right")),
+      fpsText: this.describeFrameRate(),
+      cpuFrameText: this.describeCpuFrameTime(),
+      gpuFrameText: this.describeGpuFrameTime(),
       pinchTargetId: left?.pinchCandidateId ?? right?.pinchCandidateId ?? null,
       grabTargetId: left?.grabbedPodId ?? right?.grabbedPodId ?? null,
       fingertipHand,
@@ -3124,8 +3708,51 @@ export class PodScene {
       gustStatus: this.describeGustStatus(),
       tableHeightCm: Math.round(this.boardSurfaceHeight * 100),
       tableAdjustingHand: this.hudSliderActiveHand,
+      tableMoveStatus: this.describeTableMoveStatus(trackedHands),
+      anchorStatus: this.describeAnchorStatus(),
     };
     this.refreshHud();
+  }
+
+  private describeFrameRate(): string {
+    if (this.smoothedFps <= 0) {
+      return "--";
+    }
+    return `${Math.round(this.smoothedFps)} fps`;
+  }
+
+  private describeCpuFrameTime(): string {
+    if (this.smoothedCpuFrameMs <= 0) {
+      return "--";
+    }
+    return `${this.smoothedCpuFrameMs.toFixed(1)} ms`;
+  }
+
+  private describeGpuFrameTime(): string {
+    if (!this.gpuTimerExtension) {
+      return "N/A";
+    }
+    if (this.smoothedGpuFrameMs == null) {
+      return "...";
+    }
+    return `${this.smoothedGpuFrameMs.toFixed(1)} ms`;
+  }
+
+  private describeTableMoveStatus(trackedHands: ReadonlySet<"left" | "right">): string {
+    if (!this.tableMoveMode) {
+      return this.hudSliderActiveHand ? "HEIGHT DRAG" : "IDLE";
+    }
+    if (!trackedHands.has("right")) {
+      return "TRACK RIGHT";
+    }
+    if (this.tableMoveAwaitingConfirmRelease) {
+      return "RELEASE PINCH";
+    }
+    return "PREVIEW PINCH";
+  }
+
+  private describeAnchorStatus(): string {
+    return this.boardAnchorStatus;
   }
 
   private describeGustStatus(): string {
@@ -3186,12 +3813,17 @@ export class PodScene {
     return "IDLE";
   }
 
-  private refreshHud(): void {
+  private refreshHud(immediate = false): void {
     const signature = JSON.stringify([this.hudData, this.hudDebugData]);
     if (signature === this.lastHudSignature) {
       return;
     }
+    const now = performance.now();
+    if (!immediate && now - this.lastHudDrawAt < HUD_REDRAW_INTERVAL_MS) {
+      return;
+    }
     this.lastHudSignature = signature;
+    this.lastHudDrawAt = now;
     this.drawHud();
   }
 
@@ -3201,6 +3833,9 @@ export class PodScene {
       rightTracked: false,
       leftGesture: "TRACK LOST",
       rightGesture: "TRACK LOST",
+      fpsText: "--",
+      cpuFrameText: "--",
+      gpuFrameText: "N/A",
       pinchTargetId: null,
       grabTargetId: null,
       fingertipHand: null,
@@ -3208,8 +3843,14 @@ export class PodScene {
       gustStatus: "READY",
       tableHeightCm: Math.round(this.boardSurfaceHeight * 100),
       tableAdjustingHand: null,
+      tableMoveStatus: "IDLE",
+      anchorStatus: this.boardAnchorStatus,
     };
-    this.refreshHud();
+    this.refreshHud(true);
+  }
+
+  private wakePodBody(physicsEntry: PodPhysicsEntry): void {
+    physicsEntry.body.wakeUp();
   }
 
   private updatePointingHighlights(): void {
