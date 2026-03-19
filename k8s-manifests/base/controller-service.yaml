@@ -19,6 +19,10 @@ spec:
           image: controller-service
           command: ["sh", "-c"]
           args: ["sleep 5 && /app/controller-service"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "100M"
           ports:
             - containerPort: 50052
           env:

@@ -32,12 +32,6 @@ resource "google_container_cluster" "deploy" {
   enable_autopilot    = true
   deletion_protection = false
 
-  cluster_autoscaling {
-    auto_provisioning_defaults {
-      service_account = google_service_account.gke_nodes_sa.email
-    }
-  }
-
   ip_allocation_policy {
     cluster_secondary_range_name  = "deploy-pods"
     services_secondary_range_name = "deploy-services"

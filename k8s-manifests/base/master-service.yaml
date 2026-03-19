@@ -19,6 +19,10 @@ spec:
           image: master-service
           command: ["sh", "-c"]
           args: ["sleep 5 && /app/master-service"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "100M"
           ports:
             - containerPort: 8080
           env:

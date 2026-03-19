@@ -18,6 +18,10 @@ spec:
         - name: cloudflared
           image: cloudflare/cloudflared:latest
           args: ["tunnel", "--no-autoupdate", "run", "--token", "$(CLOUDFLARED_TOKEN)"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "100M"
           envFrom:
             - secretRef:
                 name: cloudflared-secret

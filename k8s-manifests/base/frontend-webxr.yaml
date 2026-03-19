@@ -17,6 +17,10 @@ spec:
       containers:
         - name: frontend-webxr
           image: frontend-webxr
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "100M"
           ports:
             - containerPort: 80 # Adjust port if needed based on the frontend Dockerfile
 
