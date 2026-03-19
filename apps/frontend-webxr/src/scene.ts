@@ -72,7 +72,7 @@ interface HandPhysicsState {
   gustPoseActive: boolean;
   gustMotionLatch: boolean;
   gustCooldownUntil: number;
-  wristRotationLocal: THREE.Quaternion | null;
+  gripRotationLocal: THREE.Quaternion | null;
   grabRotationOffset: THREE.Quaternion | null;
 }
 
@@ -172,6 +172,7 @@ const GUST_SOURCE_OFFSET = 0.035;
 const GUST_PARTICLE_SEGMENTS = 18;
 const GUST_PARTICLE_LENGTH = 0.22;
 const GUST_PARTICLE_SPREAD = 0.08;
+const GRAB_RELEASE_GRACE_MS = 180;
 
 function statusColor(pod: SlaveState): string {
   if (pod.status === "SLAVE_STATUS_GONE") {
@@ -2489,6 +2490,21 @@ export class PodScene {
     const palmLateralWorld = new THREE.Vector3()
       .subVectors(knuckles[3] ?? palmCenter, knuckles[0] ?? wristPosition)
       .normalize();
+    const pinchAxisWorld = indexPosition.clone().sub(thumbPosition).normalize();
+    let gripUpWorld = wristPosition.clone().sub(pinchMidpointWorld);
+    gripUpWorld.addScaledVector(pinchAxisWorld, -gripUpWorld.dot(pinchAxisWorld));
+    if (gripUpWorld.lengthSq() <= 1e-6) {
+      gripUpWorld = handUpWorld.clone().multiplyScalar(-1);
+    } else {
+      gripUpWorld.normalize();
+    }
+    let gripForwardWorld = new THREE.Vector3().crossVectors(pinchAxisWorld, gripUpWorld);
+    if (gripForwardWorld.lengthSq() <= 1e-6) {
+      gripForwardWorld = palmNormalWorld.clone();
+    } else {
+      gripForwardWorld.normalize();
+    }
+    gripUpWorld = new THREE.Vector3().crossVectors(gripForwardWorld, pinchAxisWorld).normalize();
     let sweepSpeed = 0;
     let palmVelocityWorld: THREE.Vector3 | null = null;
 
@@ -2510,7 +2526,9 @@ export class PodScene {
     handPhysics.lastPalmSampleAt = nowMs;
     handPhysics.sweepSpeed = sweepSpeed;
     handPhysics.gustPoseActive = this.isHandInGustPose(handPhysics);
-    handPhysics.wristRotationLocal = this.worldQuaternionToBoardLocal(wristRotation);
+    handPhysics.gripRotationLocal = this.worldQuaternionToBoardLocal(
+      quaternionFromBasis(pinchAxisWorld, gripUpWorld, gripForwardWorld),
+    );
 
     return {
       wristPose,
@@ -2612,7 +2630,7 @@ export class PodScene {
       gustPoseActive: false,
       gustMotionLatch: false,
       gustCooldownUntil: 0,
-      wristRotationLocal: null,
+      gripRotationLocal: null,
       grabRotationOffset: null,
     };
 
@@ -2756,6 +2774,7 @@ export class PodScene {
     if (!handState) {
       return;
     }
+    const nowMs = performance.now();
 
     if (this.hudSliderActiveHand === handedness) {
       if (handState.grabbedPodId) {
@@ -2767,22 +2786,41 @@ export class PodScene {
     const activeGrabbedPodId = handState.grabbedPodId;
     if (activeGrabbedPodId) {
       const physicsEntry = this.podPhysicsById.get(activeGrabbedPodId);
-      if (
-        !physicsEntry ||
-        !handState.pinchActive ||
-        !handState.pinchMidpointLocal ||
-        handState.pinchCandidateId !== activeGrabbedPodId
-      ) {
+      if (!physicsEntry) {
         this.releaseGrab(handedness);
+        return;
+      }
+
+      if (!handState.pinchActive || !handState.pinchMidpointLocal) {
+        if (nowMs - handState.lastGrabAt > GRAB_RELEASE_GRACE_MS) {
+          this.releaseGrab(handedness);
+          return;
+        }
+
+        const holdPoint = handState.lastGrabPointLocal;
+        if (holdPoint) {
+          physicsEntry.body.setNextKinematicTranslation({
+            x: holdPoint.x,
+            y: holdPoint.y,
+            z: holdPoint.z,
+          });
+        }
+        const holdRotation = physicsEntry.body.rotation();
+        physicsEntry.body.setNextKinematicRotation({
+          x: holdRotation.x,
+          y: holdRotation.y,
+          z: holdRotation.z,
+          w: holdRotation.w,
+        });
         return;
       }
 
       const target = handState.pinchMidpointLocal;
       physicsEntry.body.setNextKinematicTranslation({ x: target.x, y: target.y, z: target.z });
-      if (handState.wristRotationLocal) {
+      if (handState.gripRotationLocal) {
         const targetRotation = handState.grabRotationOffset
-          ? handState.wristRotationLocal.clone().multiply(handState.grabRotationOffset)
-          : handState.wristRotationLocal;
+          ? handState.gripRotationLocal.clone().multiply(handState.grabRotationOffset)
+          : handState.gripRotationLocal;
         physicsEntry.body.setNextKinematicRotation({
           x: targetRotation.x,
           y: targetRotation.y,
@@ -2791,7 +2829,7 @@ export class PodScene {
         });
       }
       handState.lastGrabPointLocal = target.clone();
-      handState.lastGrabAt = performance.now();
+      handState.lastGrabAt = nowMs;
       return;
     }
 
@@ -2823,12 +2861,12 @@ export class PodScene {
     physicsEntry.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
     physicsEntry.body.setTranslation({ x: target.x, y: target.y, z: target.z }, true);
     physicsEntry.body.setNextKinematicTranslation({ x: target.x, y: target.y, z: target.z });
-    if (handState.wristRotationLocal) {
-      handState.grabRotationOffset = handState.wristRotationLocal
+    if (handState.gripRotationLocal) {
+      handState.grabRotationOffset = handState.gripRotationLocal
         .clone()
         .invert()
         .multiply(currentRotationQuaternion);
-      const targetRotation = handState.wristRotationLocal
+      const targetRotation = handState.gripRotationLocal
         .clone()
         .multiply(handState.grabRotationOffset);
       physicsEntry.body.setRotation(
@@ -2851,7 +2889,7 @@ export class PodScene {
     }
     handState.grabbedPodId = targetPodId;
     handState.lastGrabPointLocal = target.clone();
-    handState.lastGrabAt = performance.now();
+    handState.lastGrabAt = nowMs;
     this.podGrabOwnerById.set(targetPodId, handedness);
   }
 
@@ -2908,7 +2946,7 @@ export class PodScene {
       handState.gustPoseActive = false;
       handState.gustMotionLatch = false;
       handState.gustCooldownUntil = 0;
-      handState.wristRotationLocal = null;
+      handState.gripRotationLocal = null;
       handState.grabRotationOffset = null;
       for (const [body, debugMesh] of [
         [handState.palmBody, handState.palmDebugMesh],
@@ -3277,6 +3315,16 @@ function jointPosition(pose: XRJointPose, reusableMatrix: THREE.Matrix4): THREE.
 function jointRotation(pose: XRJointPose, reusableMatrix: THREE.Matrix4): THREE.Quaternion {
   reusableMatrix.fromArray(pose.transform.matrix);
   return new THREE.Quaternion().setFromRotationMatrix(reusableMatrix);
+}
+
+function quaternionFromBasis(
+  xAxis: THREE.Vector3,
+  yAxis: THREE.Vector3,
+  zAxis: THREE.Vector3,
+): THREE.Quaternion {
+  return new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis),
+  );
 }
 
 function truncateText(value: string, limit: number): string {
